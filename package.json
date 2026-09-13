@@ -1,0 +1,13 @@
+{
+  "name": "resonant-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check native-host/*.js && node --check extension/*.js && node --check scripts/*.js && node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
