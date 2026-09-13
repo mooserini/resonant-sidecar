@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test",
-    "check": "node --check native-host/*.js && node --check extension/*.js && node --check scripts/*.js && node --test"
+    "test": "node --test test/*.test.js",
+    "check": "node --check native-host/*.js && node --check extension/*.js && node --check scripts/*.js && node --test test/*.test.js"
   },
   "engines": {
     "node": ">=22"
