@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Resonant Sidecar</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">LOCAL CONVERSATION LINK</p>
+        <h1>Resonant Sidecar</h1>
+      </div>
+      <span id="connection-status" class="status" data-state="connecting">Connecting</span>
+    </header>
+
+    <main>
+      <ol id="transcript" class="transcript" aria-label="Conversation"></ol>
+    </main>
+
+    <footer class="composer">
+      <p id="announcement" class="sr-only" aria-live="polite"></p>
+      <p id="error-message" class="error" role="alert" hidden></p>
+      <form id="turn-form">
+        <label for="turn-text">Message to Codex</label>
+        <textarea id="turn-text" name="message" rows="4" maxlength="32768" required></textarea>
+        <div class="actions">
+          <button id="send-button" type="submit">Send turn</button>
+          <button id="stop-button" class="stop" type="button" disabled>
+            <span aria-hidden="true">×</span> Stop
+          </button>
+        </div>
+      </form>
+      <p class="boundary">Conversation only · no browser-page access · no tool approvals</p>
+    </footer>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
