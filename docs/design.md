@@ -70,9 +70,9 @@ The Stop button sends `turn/interrupt` for the currently active thread and turn.
 Using the unpacked extension in the on-device Chrome Dev Agent profile:
 
 1. Submit a nonce and ask Codex to repeat it without tools.
-2. Ask Codex to recall the same nonce.
-3. Ask Codex to combine it with a second nonce.
-4. Confirm all replies arrive in order, the same thread identifier is retained, and no tool or approval event occurred.
-5. Reload the side panel and confirm the stored session identifier resumes for one further recall turn.
+2. Close the side panel and confirm its native-host process exits.
+3. Reopen the side panel and ask Codex to recall the same nonce.
+4. Ask Codex to perform a deterministic transformation of the remembered nonce.
+5. Confirm all replies arrive in order, the durable thread resumes, and no tool or approval event occurred.
 
 This demonstrates conversational continuity. It does not yet demonstrate page access, CDP control, or safe approval rendering.

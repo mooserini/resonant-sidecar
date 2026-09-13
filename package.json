@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check native-host/*.js && node --check extension/*.js && node --check scripts/*.js && node --test test/*.test.js"
+    "check": "node --check native-host/*.js && node --check extension/*.js && node --check scripts/*.js && node --test test/*.test.js",
+    "smoke:real": "node test/real-app-server-smoke.js"
   },
   "engines": {
     "node": ">=22"

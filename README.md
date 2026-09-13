@@ -1,0 +1,76 @@
+# Resonant Sidecar
+
+Resonant Sidecar is a local Chrome Dev side panel for one durable Codex CLI conversation. It is an intentionally narrow prototype: text enters the panel, crosses Chrome Native Messaging, and reaches `codex app-server` over stdio. Assistant text returns over the same path.
+
+## V1 boundary
+
+- No TCP, WebSocket, SSH, or localhost listener.
+- No `tabs`, page-content, cookie, history, clipboard, or host permission.
+- No saved transcript. The extension stores only the Codex thread ID in `chrome.storage.session`.
+- No sidecar slash-command parser. A leading `/` is ordinary message text.
+- Codex starts read-only with approval policy `never` and explicit zero-tool test instructions.
+- Any observed tool item or approval request fails the smoke test; approval requests are declined.
+- The Stop button maps only to `turn/interrupt` for the active turn.
+
+This prototype proves conversational transport and continuity. It does not yet implement the planned single-use bootstrap secret, CDP enable switch, per-capability approval UI, cache cleaning, or a process-level kill switch. The Stop button interrupts a Codex turn; it is not yet an operating-system kill control.
+
+## Architecture
+
+```text
+Chrome Dev MV3 side panel
+  ↕ Chrome Native Messaging frames
+user-scoped Node native host
+  ↕ JSONL over child-process stdio
+codex app-server
+```
+
+Chrome launches the native host only when the side panel connects. Closing the panel disconnects the native port and closes that host process. The Codex thread itself is durable and can be resumed by its ID.
+
+## Test locally
+
+Requirements: macOS, Chrome Dev, Node.js 22 or newer, and an authenticated Codex CLI.
+
+```sh
+npm run check
+npm run smoke:real
+```
+
+The deterministic real smoke test starts one native host, creates a Codex thread, completes a turn, stops the host, starts a second host, resumes the same thread, and completes two context-dependent turns. It prints thread/turn IDs and SHA-256 reply receipts rather than a transcript.
+
+## Attach to Chrome Dev
+
+1. Open `chrome://extensions` in the intended local Chrome Dev profile.
+2. Enable Developer mode and choose **Load unpacked**.
+3. Select the absolute `extension/` directory in this checkout.
+4. Copy the 32-character extension ID Chrome displays.
+5. Preview the exact native-host registration without changing files:
+
+   ```sh
+   node scripts/install-macos.js --extension-id EXTENSION_ID
+   ```
+
+6. Inspect the one allowed origin, then install it:
+
+   ```sh
+   node scripts/install-macos.js --install --extension-id EXTENSION_ID
+   ```
+
+7. Click the extension action to open its side panel.
+
+The installer writes only:
+
+- `~/Library/Application Support/Resonant Sidecar/native-host`
+- `~/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json`
+
+The native-host manifest authorizes exactly `chrome-extension://EXTENSION_ID/`. See Chrome's [Native Messaging documentation](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and OpenAI's [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server) for the underlying protocols.
+
+## Development
+
+The project has no runtime package dependencies. Unit and process-level tests use Node's built-in test runner.
+
+```sh
+npm test
+npm run check
+```
+
+This checkout is local-only. It has no configured Git remote and is not approved for publication.

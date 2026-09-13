@@ -96,7 +96,7 @@ export class AppServerClient extends EventEmitter {
       approvalPolicy: 'never',
       cwd: this.#cwd,
       developerInstructions: ZERO_TOOL_INSTRUCTIONS,
-      sandbox: 'readOnly',
+      sandbox: 'read-only',
     };
     const response = threadId === null
       ? await this.#request('thread/start', { ...common, ephemeral: false })

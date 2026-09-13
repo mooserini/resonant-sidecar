@@ -33,7 +33,7 @@
 **Interfaces:**
 - Produces: `encodeNativeMessage(value): Buffer`, `NativeMessageDecoder`, and `parseBrowserMessage(value)`.
 
-- [ ] **Step 1: Write failing framing tests**
+- [x] **Step 1: Write failing framing tests**
 
 ```js
 test('decodes split UTF-8 Chrome frames', () => {
@@ -46,10 +46,10 @@ test('decodes split UTF-8 Chrome frames', () => {
 });
 ```
 
-- [ ] **Step 2: Run `npm test` and confirm missing modules fail**
-- [ ] **Step 3: Implement length-prefixed framing, size limits, and three allowed browser message shapes**
-- [ ] **Step 4: Run `npm test` and confirm framing and validation pass**
-- [ ] **Step 5: Commit `test: define native sidecar framing contract`**
+- [x] **Step 2: Run `npm test` and confirm missing modules fail**
+- [x] **Step 3: Implement length-prefixed framing, size limits, and three allowed browser message shapes**
+- [x] **Step 4: Run `npm test` and confirm framing and validation pass**
+- [x] **Step 5: Commit `test: define native sidecar framing contract`**
 
 ### Task 2: Codex app-server session adapter
 
@@ -62,7 +62,7 @@ test('decodes split UTF-8 Chrome frames', () => {
 - Consumes: newline-delimited JSON streams.
 - Produces: `AppServerClient.start()`, `openSession(threadId)`, `startTurn(text)`, `interruptTurn()`, `close()` and typed event callbacks.
 
-- [ ] **Step 1: Write a failing integration test against a deterministic fake app-server**
+- [x] **Step 1: Write a failing integration test against a deterministic fake app-server**
 
 ```js
 test('starts one thread and sends consecutive text turns to it', async () => {
@@ -76,10 +76,10 @@ test('starts one thread and sends consecutive text turns to it', async () => {
 });
 ```
 
-- [ ] **Step 2: Run the targeted test and confirm the adapter is missing**
-- [ ] **Step 3: Implement initialization, request correlation, thread start/resume, turn streaming, and interruption**
-- [ ] **Step 4: Add and pass tests for malformed JSON, child exit, unsolicited tool/approval requests, and leading-slash preservation**
-- [ ] **Step 5: Commit `feat: add Codex app-server session adapter`**
+- [x] **Step 2: Run the targeted test and confirm the adapter is missing**
+- [x] **Step 3: Implement initialization, request correlation, thread start/resume, turn streaming, and interruption**
+- [x] **Step 4: Add and pass tests for malformed JSON, child exit, unsolicited tool/approval requests, and leading-slash preservation**
+- [x] **Step 5: Commit `feat: add Codex app-server session adapter`**
 
 ### Task 3: Native host bridge
 
@@ -91,11 +91,11 @@ test('starts one thread and sends consecutive text turns to it', async () => {
 - Consumes: Chrome Native Messaging frames on stdin.
 - Produces: validated sidecar events as Chrome Native Messaging frames on stdout.
 
-- [ ] **Step 1: Write a failing process-level test that exchanges framed session and turn messages**
-- [ ] **Step 2: Run the targeted test and confirm no host entry point exists**
-- [ ] **Step 3: Implement the bridge with stdout reserved exclusively for frames and diagnostics on stderr**
-- [ ] **Step 4: Run the process-level test and the complete suite**
-- [ ] **Step 5: Commit `feat: bridge Chrome native messaging to Codex`**
+- [x] **Step 1: Write a failing process-level test that exchanges framed session and turn messages**
+- [x] **Step 2: Run the targeted test and confirm no host entry point exists**
+- [x] **Step 3: Implement the bridge with stdout reserved exclusively for frames and diagnostics on stderr**
+- [x] **Step 4: Run the process-level test and the complete suite**
+- [x] **Step 5: Commit `feat: bridge Chrome native messaging to Codex`**
 
 ### Task 4: Accessible Manifest V3 side panel
 
@@ -111,11 +111,11 @@ test('starts one thread and sends consecutive text turns to it', async () => {
 - Consumes: host name `com.resonantmirror.sidecar` and sidecar protocol events.
 - Produces: action-opened side panel with transcript, composer, connection state, and Stop button.
 
-- [ ] **Step 1: Write failing manifest and DOM-contract tests**
-- [ ] **Step 2: Run the targeted tests and confirm the extension files are absent**
-- [ ] **Step 3: Implement the MV3 manifest, synchronous service-worker listeners, semantic transcript/form controls, explicit labels, visible focus, and polite/assertive live regions**
-- [ ] **Step 4: Run static checks and the complete test suite**
-- [ ] **Step 5: Commit `feat: add local Codex side panel`**
+- [x] **Step 1: Write failing manifest and DOM-contract tests**
+- [x] **Step 2: Run the targeted tests and confirm the extension files are absent**
+- [x] **Step 3: Implement the MV3 manifest, synchronous service-worker listeners, semantic transcript/form controls, explicit labels, visible focus, and polite/assertive live regions**
+- [x] **Step 4: Run static checks and the complete test suite**
+- [x] **Step 5: Commit `feat: add local Codex side panel`**
 
 ### Task 5: Local Chrome Dev installation
 
@@ -128,11 +128,11 @@ test('starts one thread and sends consecutive text turns to it', async () => {
 - Consumes: unpacked extension ID, absolute Node path, absolute Codex path, and project root.
 - Produces: one user-scoped native-host registration whose `allowed_origins` contains only that extension ID.
 
-- [ ] **Step 1: Write failing tests for path validation, exact origin generation, and Chrome Dev target selection**
-- [ ] **Step 2: Run the targeted test and confirm the installer is missing**
-- [ ] **Step 3: Implement dry-run output and explicit `--install --extension-id` mutation**
-- [ ] **Step 4: Load the unpacked extension, capture its ID, run the installer, and inspect the generated manifest before use**
-- [ ] **Step 5: Commit `feat: add inspected macOS native-host installer`**
+- [x] **Step 1: Write failing tests for path validation, exact origin generation, and Chrome Dev target selection**
+- [x] **Step 2: Run the targeted test and confirm the installer is missing**
+- [x] **Step 3: Implement dry-run output and explicit `--install --extension-id` mutation**
+- [x] **Step 4: Load the unpacked extension, capture its ID, run the installer, and inspect the generated manifest before use**
+- [x] **Step 5: Commit `feat: add inspected macOS native-host installer`**
 
 ### Task 6: Real zero-tool durability proof
 
@@ -145,8 +145,8 @@ test('starts one thread and sends consecutive text turns to it', async () => {
 - Consumes: installed Codex authentication and the locally attached Chrome Dev sidecar.
 - Produces: a reproducible tool-free continuity receipt with thread and turn IDs but no transcript secrets.
 
-- [ ] **Step 1: Add a smoke harness that sends deterministic nonce prompts and fails on any tool or approval event**
-- [ ] **Step 2: Run the smoke harness directly against real `codex app-server` for three turns**
-- [ ] **Step 3: Repeat the same sequence through the loaded Chrome Dev side panel, including one panel reload/resume**
-- [ ] **Step 4: Run `npm run check`, inspect the installed manifest, and record exact pass/fail receipts**
-- [ ] **Step 5: Commit `test: prove zero-tool conversational continuity`**
+- [x] **Step 1: Add a smoke harness that sends deterministic nonce prompts and fails on any tool or approval event**
+- [x] **Step 2: Run the smoke harness directly against real `codex app-server` for three turns**
+- [x] **Step 3: Repeat the same sequence through the loaded Chrome Dev side panel, including one panel reload/resume**
+- [x] **Step 4: Run `npm run check`, inspect the installed manifest, and record exact pass/fail receipts**
+- [x] **Step 5: Commit `test: prove zero-tool conversational continuity`**

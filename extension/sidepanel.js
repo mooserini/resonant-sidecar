@@ -59,7 +59,7 @@ function handleEvent(event) {
   }
   if (event.type === 'assistant.delta') {
     if (!assistantBody) assistantBody = appendMessage('assistant');
-    assistantBody.textContent += event.delta || '';
+    assistantBody.textContent += event.text || '';
     return;
   }
   if (event.type === 'turn.completed') {

@@ -26,6 +26,13 @@ input.on('line', line => {
   if (message.method === 'initialized') return;
 
   if (message.method === 'thread/start' || message.method === 'thread/resume') {
+    if (message.params.sandbox !== 'read-only') {
+      send({
+        id: message.id,
+        error: { code: -32602, message: `Unexpected sandbox value: ${message.params.sandbox}` },
+      });
+      return;
+    }
     send({ id: message.id, result: { thread: { id: message.params.threadId ?? threadId } } });
     return;
   }
