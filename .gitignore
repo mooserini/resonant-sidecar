@@ -1,0 +1,10 @@
+.worktrees/
+.superpowers/
+
+# Machine-local version store. Only runtime/README.md is source-controlled.
+runtime/*
+!runtime/README.md
+
+# Machine-local custody evidence. Only review-receipts/README.md is source-controlled.
+review-receipts/*
+!review-receipts/README.md
