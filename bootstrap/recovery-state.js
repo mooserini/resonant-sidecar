@@ -36,3 +36,12 @@ export function recoverInterruptedActivation(state) {
 }
 
 export const samePin = (a, b) => canonicalJson(a) === canonicalJson(b);
+
+export function snapshotRecoveryBinding(value) {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('Invalid recovery binding');
+  const fields = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(fields).some(key => typeof key !== 'string' || !Object.hasOwn(fields[key], 'value') || !fields[key].enumerable)) throw new Error('Invalid recovery binding');
+  const b = Object.fromEntries(Object.entries(fields).map(([key, d]) => [key, d.value]));
+  if (Object.keys(b).sort().join(',') !== 'candidateDigest,expiresAt,nonceDigest,policyDigest,reviewId,threadId' || !id.test(b.reviewId) || ![b.candidateDigest, b.policyDigest, b.nonceDigest].every(v => typeof v === 'string' && digest.test(v)) || typeof b.threadId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(b.threadId) || !Number.isSafeInteger(b.expiresAt)) throw new Error('Invalid recovery binding');
+  return Object.freeze(b);
+}

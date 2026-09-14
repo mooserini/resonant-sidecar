@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { assertBundleManifest, buildBundleManifest } from '../review/bundle-manifest.js';
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
-import { assertPin, snapshotDecision, recoverInterruptedActivation, samePin } from './recovery-state.js';
+import { assertPin, snapshotDecision, snapshotRecoveryBinding, recoverInterruptedActivation, samePin } from './recovery-state.js';
 import { withRuntimeLock } from './runtime-lock.js';
 
 const MAX_FILE = 8 * 1024 * 1024;
@@ -53,11 +53,12 @@ function writeNew(p, bytes, mode = 0o600) {
 }
 
 export class VersionStore {
-  #project; #root; #device; #consume; #pending = null; #runtimeGuard = null;
-  constructor({ projectRoot, consumeDecision } = {}) {
+  #project; #root; #device; #consume; #verifyConsumed; #clock; #recovered = null; #pending = null; #runtimeGuard = null;
+  constructor({ projectRoot, consumeDecision, verifyConsumedDecision, clock = Date.now } = {}) {
     this.#project = concrete(projectRoot);
     this.#root = path.join(projectRoot, 'runtime');
     this.#consume = consumeDecision;
+    this.#verifyConsumed = verifyConsumedDecision; this.#clock = clock;
   }
   #prepare() {
     concrete(this.#project);
@@ -274,6 +275,47 @@ export class VersionStore {
       const consumed = readCanonical(path.join(this.#root, 'decisions', `${state.decisionHash}.json`), this.#device);
       if (consumed.policyDigest !== decision.policyDigest) fail('Pending refresh policy mismatch');
       return this.#version(state.candidate);
+    });
+  }
+  async #recoveryBinding(binding) {
+    const state = this.#state();
+    const now = this.#clock();
+    if (!Number.isSafeInteger(now) || state?.phase !== 'pending-verification' || binding.expiresAt <= now || state.decisionHash !== binding.nonceDigest || state.candidate.digest !== binding.candidateDigest || state.candidate.reviewId !== binding.reviewId || !samePin(this.#pin('active'), state.candidate) || !samePin(this.#pin('previous'), state.previous)) fail('Pending recovery binding mismatch');
+    this.#assertInstalled(state.candidate);
+    const consumed = readCanonical(path.join(this.#root, 'decisions', `${state.decisionHash}.json`), this.#device);
+    if (canonicalJson(consumed) !== canonicalJson({ candidate: state.candidate, policyDigest: binding.policyDigest })) fail('Pending recovery consumption mismatch');
+    if (typeof this.#verifyConsumed !== 'function') fail('Trusted consumed decision verifier required');
+    const proof = await this.#verifyConsumed(binding);
+    if (canonicalJson(proof) !== canonicalJson({ ...binding, consumed: true })) fail('Pending recovery proof mismatch');
+    await this.#version(state.candidate);
+    if (state.previous) await this.#version(state.previous);
+    if (canonicalJson(this.#state()) !== canonicalJson(state) || !samePin(this.#pin('active'), state.candidate) || !samePin(this.#pin('previous'), state.previous) || canonicalJson(readCanonical(path.join(this.#root, 'decisions', `${state.decisionHash}.json`), this.#device)) !== canonicalJson(consumed) || binding.expiresAt <= this.#clock()) fail('Pending recovery custody changed');
+    return state;
+  }
+  async resumePendingActivation(binding) {
+    binding = snapshotRecoveryBinding(binding);
+    return this.#locked(async () => {
+      const state = await this.#recoveryBinding(binding);
+      this.#pending = state.decisionHash; this.#recovered = binding;
+      return { phase: state.phase, candidate: state.candidate };
+    });
+  }
+  async resolveRecoveredHost(binding) {
+    binding = snapshotRecoveryBinding(binding);
+    return this.#locked(async () => {
+      if (canonicalJson(this.#recovered) !== canonicalJson(binding) || this.#pending !== binding.nonceDigest) fail('Pending recovery not rehydrated');
+      const state = await this.#recoveryBinding(binding);
+      return this.#version(state.candidate);
+    });
+  }
+  async completeRecoveredActivation(binding) {
+    binding = snapshotRecoveryBinding(binding);
+    return this.#locked(async () => {
+      if (canonicalJson(this.#recovered) !== canonicalJson(binding) || this.#pending !== binding.nonceDigest) fail('Pending recovery not rehydrated');
+      const state = await this.#recoveryBinding(binding);
+      if (this.#runtimeGuard && !this.#runtimeGuard({ ...state.candidate, decisionHash: state.decisionHash })) fail('Pending runtime refresh required before completion');
+      state.phase = 'complete'; this.#save(state); this.#pending = null; this.#recovered = null;
+      return { phase: 'complete' };
     });
   }
 }

@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { parseBrowserMessage } from '../native-host/sidecar-protocol.js';
 import { BoundedDecoder, QUEUE_LIMIT, startNativeProxy, writeFrame } from './native-proxy.js';
-import { snapshotDecision } from './recovery-state.js';
+import { snapshotDecision, snapshotRecoveryBinding } from './recovery-state.js';
 import { sha256Bytes } from '../review/canonical-json.js';
 
 // Requests contain no candidate text, decision nonce, command, or path. The
@@ -15,11 +15,13 @@ export function parseBootstrapMessage(value) {
   return { channel: 'conversation', message: parseBrowserMessage(value) };
 }
 
-export async function runBootstrap({ store, nodePath, codexPath, workspace, userHome, codexHome, coordinator, input = process.stdin, output = process.stdout, signals = process }) {
-  await store.recover();
+export async function runBootstrap({ store, nodePath, codexPath, workspace, userHome, codexHome, coordinator, resumeActivation = null, proxyFactory = startNativeProxy, input = process.stdin, output = process.stdout, signals = process }) {
+  const resume = resumeActivation === null ? null : snapshotRecoveryBinding(resumeActivation);
+  if (resume) await store.resumePendingActivation(resume);
+  else await store.recover();
   let proxy; let lastChildPid; let stopped = false; let closePromise; let resolveClosed; let queued = 0;
   let refreshing = null; let refreshed = null; let readyWait = null;
-  let runtimeState = null; let sessionThreadId = null; let sessionRequested = false; let generation = 0;
+  let runtimeState = null; let sessionThreadId = resume?.threadId ?? null; let sessionRequested = resume !== null; let generation = 0;
   const owned = new Set(); let transitions = Promise.resolve(); let transitionBusy = false;
   const serialize = action => {
     const result = transitions.then(async () => {
@@ -56,21 +58,22 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   const startProxy = active => {
     if (stopped || proxy || owned.size !== 0) throw new Error('Proxy ownership transition invalid');
     const ownGeneration = ++generation;
-    proxy = startNativeProxy({ nodePath, codexPath, active, workspace, userHome, codexHome, onFailure: failure, onMessage: message => {
+    proxy = proxyFactory({ nodePath, codexPath, active, workspace, userHome, codexHome, onFailure: failure, onMessage: message => {
       if (stopped || generation !== ownGeneration) return;
       if (message.type === 'session.ready') {
         if (!sessionRequested || (sessionThreadId !== null && message.threadId !== sessionThreadId) || (readyWait && message.threadId !== readyWait.threadId)) { failure(); return; }
         sessionThreadId = message.threadId;
+        runtimeState = Object.freeze({ ...runtimeState, threadId: sessionThreadId });
         readyWait?.resolve(); readyWait = null;
       }
       send(message);
     } });
     owned.add(proxy);
     lastChildPid = proxy.pid;
-    runtimeState = Object.freeze({ digest: active.digest, reviewId: active.reviewId, hostPath: active.hostPath, pid: proxy.pid, pgid: proxy.pid });
+    runtimeState = Object.freeze({ digest: active.digest, reviewId: active.reviewId, hostPath: active.hostPath, pid: proxy.pid, pgid: proxy.pid, threadId: null });
   };
-  const refreshPending = decision => {
-    decision = snapshotDecision(decision);
+  const refresh = (decision, mode = 'pending') => {
+    decision = mode === 'previous' ? null : mode === 'recovered' ? snapshotRecoveryBinding(decision) : snapshotDecision(decision);
     if (stopped || refreshing) return Promise.reject(new Error('Runtime refresh unavailable'));
     refreshed = null;
     const transition = serialize(async () => {
@@ -79,7 +82,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
         await stopOwned();
         if (stopped) throw new Error('Runtime refresh cancelled');
         if (sessionThreadId === null) throw new Error('Session identity unresolved for refresh');
-        const active = await store.resolvePendingHost(decision);
+        const active = mode === 'previous' ? await store.resolveActiveHost() : mode === 'recovered' ? await store.resolveRecoveredHost(decision) : await store.resolvePendingHost(decision);
         if (stopped) throw new Error('Runtime refresh cancelled');
         startProxy(active);
         const ready = new Promise((resolve, reject) => {
@@ -90,7 +93,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
         proxy.send({ type: 'session.open', threadId: sessionThreadId });
         await ready;
         if (stopped) throw new Error('Runtime refresh cancelled');
-        refreshed = Object.freeze({ decisionHash: sha256Bytes(decision.nonce), pid: proxy.pid });
+        refreshed = mode === 'previous' ? null : Object.freeze({ decisionHash: mode === 'recovered' ? decision.nonceDigest : sha256Bytes(decision.nonce), pid: proxy.pid });
         return runtimeState;
       } finally { clearTimeout(timer); readyWait = null; }
     });
@@ -142,7 +145,9 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   input.on('data', data); input.on('end', close); input.on('close', close); input.on('error', close);
   output.on('error', close); signals.on('SIGTERM', close); signals.on('SIGINT', close); signals.on('SIGHUP', close);
   return {
-    close, closed, refreshPending,
+    close, closed, refreshPending: decision => refresh(decision), refreshRecovered: binding => refresh(binding, 'recovered'),
+    stopCandidate: () => serialize(async () => { refreshed = null; await stopOwned(); }),
+    restartPrevious: () => refresh(null, 'previous'),
     completeActivation(decision) { return store.completeActivation(decision); },
     get childPid() { return proxy?.pid ?? lastChildPid; },
     get runtimeState() { return runtimeState; },
