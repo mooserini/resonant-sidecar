@@ -6,8 +6,6 @@ import {
   mkdir,
   open,
   readFile,
-  readdir,
-  rm,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
@@ -409,20 +407,6 @@ async function rereadSnapshot(bundleRoot, candidate) {
   return snapshot;
 }
 
-async function makeOwnedTreeWritable(target, custody) {
-  await assertDirectoryCustody(custody);
-  const info = await lstat(target).catch(() => null);
-  if (!info || info.isSymbolicLink()) return;
-  if (info.isDirectory()) {
-    await chmod(target, 0o700);
-    for (const entry of await readdir(target)) {
-      await makeOwnedTreeWritable(path.join(target, entry), custody);
-    }
-  } else {
-    await chmod(target, 0o600);
-  }
-}
-
 export async function stageLocalCandidate({ repoRoot, reviewId, quarantineRoot, policy, git = localGit }) {
   const quarantine = await validateQuarantine(repoRoot, quarantineRoot, reviewId);
   const candidate = await loadCandidate({ repoRoot, policy, git });
@@ -488,9 +472,6 @@ export async function stageLocalCandidate({ repoRoot, reviewId, quarantineRoot, 
       try {
         if (!custody) throw sourceError('quarantine-custody-changed');
         await assertDirectoryCustody(custody);
-        await makeOwnedTreeWritable(quarantine.reviewRoot, custody);
-        await assertDirectoryCustody(custody);
-        await rm(quarantine.reviewRoot, { recursive: true, force: true });
       } catch {
         failure = sourceError('quarantine-custody-changed');
       }

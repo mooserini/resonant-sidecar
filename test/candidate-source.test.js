@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -201,7 +201,7 @@ test('staging rejects dirty inputs without creating quarantine state', async t =
   await assert.rejects(lstat(path.join(quarantineRoot, 'review-dirty')), /ENOENT/);
 });
 
-test('bundle input changes during staging invalidate and remove the new quarantine', async t => {
+test('bundle input changes after staging retain the failed quarantine read-only', async t => {
   const repoRoot = await temporaryRoot(t);
   const quarantineRoot = path.join(repoRoot, 'runtime', 'quarantine');
   const git = createFakeGit({ files: FILES, statuses: ['', '', ' M package.json\n'] });
@@ -210,10 +210,12 @@ test('bundle input changes during staging invalidate and remove the new quaranti
     stageLocalCandidate({ repoRoot, reviewId: 'review-raced', quarantineRoot, policy, git }),
     error => error?.code === 'bundle-inputs-dirty',
   );
-  await assert.rejects(lstat(path.join(quarantineRoot, 'review-raced')), /ENOENT/);
+  const retained = path.join(quarantineRoot, 'review-raced', 'bundle', 'native-host', 'host.js');
+  assert.equal(await readFile(retained, 'utf8'), FILES['native-host/host.js'].bytes);
+  assert.equal((await lstat(retained)).mode & 0o777, 0o400);
 });
 
-test('ancestor substitution cannot redirect failed-staging cleanup into unrelated data', async t => {
+test('ancestor substitution cannot redirect failure handling into unrelated data', async t => {
   const repoRoot = await temporaryRoot(t);
   const outside = await temporaryRoot(t);
   const quarantineRoot = path.join(repoRoot, 'runtime', 'quarantine');
@@ -221,6 +223,7 @@ test('ancestor substitution cannot redirect failed-staging cleanup into unrelate
   const outsideReview = path.join(outside, 'review-custody');
   await mkdir(outsideReview);
   await writeFile(path.join(outsideReview, 'preserved.txt'), 'unrelated');
+  await chmod(path.join(outsideReview, 'preserved.txt'), 0o400);
   const git = createFakeGit({
     files: FILES,
     statuses: ['', '', ' M package.json\n'],
@@ -238,8 +241,39 @@ test('ancestor substitution cannot redirect failed-staging cleanup into unrelate
     caught = error;
   }
   assert.equal(await readFile(path.join(outsideReview, 'preserved.txt'), 'utf8'), 'unrelated');
+  assert.equal((await lstat(path.join(outsideReview, 'preserved.txt'))).mode & 0o777, 0o400);
   assert.equal((await lstat(path.join(movedQuarantine, 'review-custody'))).isDirectory(), true);
   assert.equal(caught?.code, 'quarantine-custody-changed');
+});
+
+test('staged-tree substitution cannot make failure handling chmod or delete outside data', async t => {
+  const repoRoot = await temporaryRoot(t);
+  const outside = await temporaryRoot(t);
+  const quarantineRoot = path.join(repoRoot, 'runtime', 'quarantine');
+  const outsideFile = path.join(outside, 'preserved.txt');
+  const stagedFile = path.join(quarantineRoot, 'review-no-cleanup', 'bundle', 'native-host', 'host.js');
+  await writeFile(outsideFile, 'unrelated');
+  await chmod(outsideFile, 0o400);
+  const git = createFakeGit({
+    files: FILES,
+    statuses: ['', '', ' M package.json\n'],
+    onStatus: async ({ index }) => {
+      if (index !== 2) return;
+      await chmod(path.dirname(stagedFile), 0o700);
+      await unlink(stagedFile);
+      await link(outsideFile, stagedFile);
+      await chmod(path.dirname(stagedFile), 0o500);
+    },
+  });
+
+  await assert.rejects(
+    stageLocalCandidate({ repoRoot, reviewId: 'review-no-cleanup', quarantineRoot, policy, git }),
+    error => error?.code === 'bundle-inputs-dirty',
+  );
+
+  assert.equal(await readFile(outsideFile, 'utf8'), 'unrelated');
+  assert.equal((await lstat(outsideFile)).mode & 0o777, 0o400);
+  assert.equal((await lstat(stagedFile)).ino, (await lstat(outsideFile)).ino);
 });
 
 test('archive extraction containment rejects traversal, an outside root, and symlinked quarantine components', async t => {
