@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://resonantmirror.local/schemas/codex-attestation.v1.json",
+  "title": "Resonant Sidecar Codex Attestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "verdict",
+    "summary",
+    "behavioralDifferences",
+    "dependencyChanges",
+    "unexplainedFiles",
+    "policyConcerns"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "verdict": {
+      "enum": [
+        "favorable",
+        "unfavorable"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "behavioralDifferences": {
+      "$ref": "#/$defs/findings"
+    },
+    "dependencyChanges": {
+      "$ref": "#/$defs/findings"
+    },
+    "unexplainedFiles": {
+      "$ref": "#/$defs/findings"
+    },
+    "policyConcerns": {
+      "$ref": "#/$defs/findings"
+    }
+  },
+  "$defs": {
+    "findings": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "maxLength": 1000
+      }
+    }
+  }
+}
