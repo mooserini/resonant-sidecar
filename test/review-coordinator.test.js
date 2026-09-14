@@ -18,6 +18,12 @@ import { EventEmitter } from 'node:events';
 
 const policy = JSON.parse(readFileSync(new URL('../policy/review-policy.v1.json', import.meta.url)));
 const favorable = { schemaVersion: 1, verdict: 'favorable', summary: 'No policy concerns', behavioralDifferences: [], dependencyChanges: [], unexplainedFiles: [], policyConcerns: [] };
+async function completionLedger(f, first, staged, binding) {
+  const receipts = new ReceiptStore({ root: path.join(f.projectRoot, 'review-receipts'), immutable: async () => {} });
+  const event = (eventType, osEvidence = { before: {}, verification: {}, after: {} }) => ({ reviewId: binding.reviewId, eventType, outcome: eventType, verifierIdentities: [{ name: 'review-coordinator', version: '1' }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, humanDecisionRef: binding.nonceDigest, projectEvidence: { activeVersion: {}, candidateVersion: {}, sourceHashes: {}, dependencyLock: {}, testResults: {} }, osEvidence });
+  for (const state of ['available', 'staged', 'deterministic-review', 'codex-review', 'eligible', 'human-accepted', 'activating']) await receipts.finalizeEvent(event(state));
+  return { receipts, finalize: osEvidence => receipts.finalizeEvent(event('activated', osEvidence)) };
+}
 async function coordinatorFixture(t, options = {}) {
   const f = await runtimeFixture(t); const first = await f.stage('first');
   const baseline = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
@@ -27,6 +33,7 @@ async function coordinatorFixture(t, options = {}) {
   const nonceStore = new DecisionNonces({ root: f.root });
   const effects = []; let coordinator; let runtimeState = { digest: first.manifest.bundleDigest, reviewId: 'first', pid: 103, threadId: 'thread-1' };
   const versionStore = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: d => coordinator.consumeDecision(d), verifyConsumedDecision: b => coordinator.verifyConsumedDecision(b) });
+  versionStore.bindRuntimeGuard(expected => runtimeState !== null && expected.digest === runtimeState.digest && expected.reviewId === runtimeState.reviewId && (!expected.pid || expected.pid === runtimeState.pid) && (!expected.threadId || expected.threadId === runtimeState.threadId));
   const deps = {
     receiptStore, nonceStore, versionStore, policy, reviewId: () => 'review-1',
     candidateSource: { inspect: async () => ({ state: 'available', manifest: staged.manifest }), stage: async () => staged },
@@ -131,9 +138,9 @@ test('only verified consumed pending transactions resume after store restart wit
   await assert.rejects(() => restarted.resolveActiveHost(), /recovery/);
   await restarted.resumePendingActivation(b);
   assert.equal((await restarted.resolveRecoveredHost(b)).digest, next.manifest.bundleDigest);
-  await restarted.completeRecoveredActivation(b);
-  assert.equal((await restarted.resolveActiveHost()).digest, next.manifest.bundleDigest);
-  await assert.rejects(() => restarted.resumePendingActivation(b), /pending|recovery/i);
+  await assert.rejects(() => restarted.completeRecoveredActivation(b), /guard|authorization/);
+  await restarted.recover();
+  assert.equal((await restarted.resolveActiveHost()).digest, first.manifest.bundleDigest);
 });
 
 test('coordinator refuses missing trusted dependencies before any action', () => {
@@ -144,23 +151,31 @@ test('bootstrap explicitly resumes B with the journal thread and gates completio
   const f = await runtimeFixture(t); const a = await f.stage('first'); const b = await f.stage('next', '// next');
   const store = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
   await store.installVersion(a); await store.activate(decisionFor(a)); await store.completeActivation(decisionFor(a));
-  await store.installVersion(b); const d = decisionFor(b, 'r'.repeat(32)); await store.activate(d);
+  await store.installVersion(b); const d = { ...decisionFor(b, 'r'.repeat(32)), policyDigest: sha256Json(policy) }; await store.activate(d);
   const binding = { reviewId: 'next', candidateDigest: d.candidateDigest, policyDigest: d.policyDigest, nonceDigest: sha256Bytes(d.nonce), threadId: 'thread-kept', expiresAt: Date.now() + 60000 };
   const restarted = new VersionStore({ projectRoot: f.projectRoot, verifyConsumedDecision: value => ({ ...value, consumed: true }) });
+  const ledger = await completionLedger(f, a, b, binding); restarted.bindReceiptStore(ledger.receipts);
+  const after = await collectMacOSEvidence({ ...osPolicy('after'), runner: runner().run });
+  const authorization = { runtime: { pid: 103, digest: b.manifest.bundleDigest, reviewId: 'next', threadId: 'thread-kept' }, ownershipPolicy: osPolicy('after'), osEvidence: { before: {}, verification: {}, after } };
   const input = new PassThrough(); const output = new PassThrough(); const signals = new EventEmitter(); const sent = [];
   let reaped = false;
   const bootstrap = await runBootstrap({ store: restarted, input, output, signals, resumeActivation: binding,
     proxyFactory: ({ active, onMessage }) => {
       assert.equal(active.digest, b.manifest.bundleDigest);
-      return { pid: 222, send: message => { sent.push(message); queueMicrotask(() => onMessage({ type: 'session.ready', threadId: 'thread-kept' })); }, close: async () => { reaped = true; } };
+      return { pid: 103, send: message => { sent.push(message); queueMicrotask(() => onMessage({ type: 'session.ready', threadId: 'thread-kept' })); }, close: async () => { reaped = true; } };
     },
   });
   t.after(() => bootstrap.close());
-  await assert.rejects(() => restarted.completeRecoveredActivation(binding), /refresh/);
+  await assert.rejects(() => restarted.completeRecoveredActivation(binding, authorization, () => ledger.finalize(authorization.osEvidence)), /refresh/);
   const live = await bootstrap.refreshRecovered(binding);
   assert.equal(live.threadId, 'thread-kept'); assert.equal(live.digest, b.manifest.bundleDigest);
   assert.deepEqual(sent, [{ type: 'session.open', threadId: 'thread-kept' }]);
-  await restarted.completeRecoveredActivation(binding);
+  const forged = structuredClone(authorization); forged.osEvidence.after.processes.find(p => p.name === 'active-host').listeners.push({ fd: 17, protocol: 'TCP', address: '127.0.0.1', port: 9000, transport: 'tcp' });
+  await assert.rejects(() => restarted.completeRecoveredActivation(binding, forged, () => { throw new Error('must not finalize'); }), /authorization/);
+  await assert.rejects(() => restarted.completeRecoveredActivation(binding, authorization, () => ({ phase: 'complete' })), /receipt/);
+  await assert.rejects(() => restarted.completeRecoveredActivation(binding, authorization, async () => { await ledger.finalize(authorization.osEvidence); throw new Error('receipt committed before crash'); }), /before crash/);
+  await restarted.completeRecoveredActivation(binding, authorization, () => { throw new Error('must not append a second activated receipt'); });
+  assert.equal((await ledger.receipts.verifyChain()).receipts.filter(r => r.eventType === 'activated').length, 1);
   await bootstrap.close(); assert.equal(reaped, true);
 });
 
@@ -171,6 +186,7 @@ async function pendingReview(f) {
   await store.installVersion(f.staged); await store.activate(e.decision);
   let c;
   f.deps.versionStore = new VersionStore({ projectRoot: f.projectRoot, verifyConsumedDecision: b => f.current().verifyConsumedDecision(b) });
+  f.deps.versionStore.bindRuntimeGuard(expected => { const live = f.deps.runtime.snapshot(); return live.digest === expected.digest && live.reviewId === expected.reviewId && (!expected.pid || expected.pid === live.pid) && (!expected.threadId || expected.threadId === live.threadId); });
   c = f.restart(); return { c, proof, decision: e.decision };
 }
 test('coordinator restart resumes only consumed journal and writes activated after fresh after evidence', async t => {
@@ -360,4 +376,74 @@ test('custody is rechecked after candidate inspection before consuming human res
   await assert.rejects(() => f.coordinator.acceptReview(e.decision), /[Cc]ustody/);
   const { readdir } = await import('node:fs/promises');
   assert.equal((await readdir(path.join(f.root, 'review-decisions'))).some(n => n.endsWith('.used.json')), false);
+});
+
+for (const boundary of ['before-activated-receipt', 'after-activated-receipt', 'after-journal-complete']) test(`completion crash ${boundary} reconciles to one truthful terminal outcome`, async t => {
+  const f = await coordinatorFixture(t); const e = await f.coordinator.startReview();
+  const finalize = f.receiptStore.finalizeEvent.bind(f.receiptStore);
+  if (boundary !== 'after-journal-complete') f.receiptStore.finalizeEvent = async input => {
+    if (input.eventType === 'activated') {
+      if (boundary === 'after-activated-receipt') await finalize(input);
+      throw new Error('simulated crash');
+    }
+    return finalize(input);
+  };
+  else {
+    const complete = f.versionStore.completeReviewedActivation?.bind(f.versionStore);
+    f.versionStore.completeReviewedActivation = async (...args) => { await complete(...args); throw new Error('simulated crash'); };
+  }
+  await assert.rejects(() => f.coordinator.acceptReview(e.decision));
+  f.receiptStore.finalizeEvent = finalize;
+  f.deps.versionStore = new VersionStore({ projectRoot: f.projectRoot, verifyConsumedDecision: b => f.current().verifyConsumedDecision(b) });
+  f.deps.versionStore.bindRuntimeGuard(expected => { const live = f.deps.runtime.snapshot(); return live.digest === expected.digest && live.reviewId === expected.reviewId; });
+  const c = f.restart();
+  const result = await c.resumePendingActivation();
+  const committed = boundary !== 'before-activated-receipt';
+  assert.equal(result.state, committed ? 'activated' : 'rolled-back');
+  assert.equal(JSON.parse(await readFile(path.join(f.root, 'recovery-state.json'))).phase, committed ? 'complete' : 'rolled-back');
+  assert.equal((await f.deps.versionStore.resolveActiveHost()).digest, committed ? f.staged.manifest.bundleDigest : f.first.manifest.bundleDigest);
+  assert.equal((await f.events()).filter(v => v === 'activated').length, committed ? 1 : 0);
+  assert.equal((await c.resumePendingActivation()).state, committed ? 'activated' : 'rolled-back');
+});
+test('a completion adapter claiming complete cannot invent evidence or activated custody', async t => {
+  const f = await coordinatorFixture(t); const e = await f.coordinator.startReview();
+  f.versionStore.completeReviewedActivation = async () => ({ phase: 'complete' });
+  assert.equal((await f.coordinator.acceptReview(e.decision)).state, 'rolled-back');
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+  assert.equal((await f.events()).includes('activated'), false);
+});
+test('rollback restores A before the runtime adapter may resolve or restart it', async t => {
+  const f = await coordinatorFixture(t); const e = await f.coordinator.startReview();
+  // Reproduce the former completed-journal B with no activated receipt.
+  const refresh = f.deps.runtime.refreshPending;
+  f.deps.runtime.refreshPending = async decision => {
+    await refresh(decision);
+    const file = path.join(f.root, 'recovery-state.json'); const state = JSON.parse(await readFile(file)); state.phase = 'complete'; await writeFile(file, canonicalJson(state) + '\n');
+    throw new Error('post-swap failure');
+  };
+  const restart = f.deps.runtime.restartPrevious;
+  f.deps.runtime.restartPrevious = async () => {
+    assert.equal(JSON.parse(await readFile(path.join(f.root, 'active/pin.json'))).digest, f.first.manifest.bundleDigest);
+    return restart();
+  };
+  assert.equal((await f.coordinator.acceptReview(e.decision)).state, 'rolled-back');
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+test('restart after after-evidence but before completion witness safely resumes verification', { timeout: 10000 }, async t => {
+  const f = await coordinatorFixture(t); const { c } = await pendingReview(f);
+  let reached; let failed;
+  const boundary = new Promise((resolve, reject) => { reached = resolve; failed = reject; });
+  f.deps.versionStore.completeRecoveredActivation = () => { reached(); return new Promise(() => {}); };
+  // Suspend the old coordinator at the durable boundary, modeling its loss.
+  // There are no subprocesses, timers, or resources owned by this pending call.
+  void c.resumePendingActivation().catch(failed);
+  await boundary;
+  const { readdir } = await import('node:fs/promises');
+  assert.deepEqual(await readdir(path.join(f.root, 'completions')), []);
+  assert.equal((await f.events()).at(-1), 'activating');
+  f.deps.versionStore = new VersionStore({ projectRoot: f.projectRoot, verifyConsumedDecision: b => f.current().verifyConsumedDecision(b) });
+  f.deps.versionStore.bindRuntimeGuard(expected => { const live = f.deps.runtime.snapshot(); return live.digest === expected.digest && live.reviewId === expected.reviewId; });
+  const restarted = f.restart(); assert.equal((await restarted.resumePendingActivation()).state, 'activated');
+  assert.equal((await f.events()).filter(v => v === 'activated').length, 1);
+  assert.equal(JSON.parse(await readFile(path.join(f.root, 'recovery-state.json'))).phase, 'complete');
 });

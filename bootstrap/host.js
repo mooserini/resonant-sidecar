@@ -38,7 +38,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   };
   const closed = new Promise(resolve => { resolveClosed = resolve; });
   const send = message => { if (!stopped) writeFrame(output, message); };
-  store.bindRuntimeGuard(expected => !stopped && !refreshing && !transitionBusy && owned.size === 1 && owned.has(proxy) && refreshed?.pid === proxy.pid && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId);
+  store.bindRuntimeGuard(expected => !stopped && !refreshing && !transitionBusy && owned.size === 1 && owned.has(proxy) && refreshed?.pid === proxy.pid && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId && (expected.pid === undefined || expected.pid === runtimeState.pid) && (expected.threadId === undefined || expected.threadId === runtimeState.threadId));
   const close = () => {
     if (closePromise) return closePromise;
     stopped = true; input.pause();
@@ -107,8 +107,26 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     return operation;
   };
   let queue = Promise.resolve();
+  let lifecyclePending = 0;
+  const lifecycleFailure = error => send({ type: 'review.failed', state: error?.name === 'CustodyError' ? 'custody-broken' : 'review-failed' });
   const decoder = new BoundedDecoder(value => {
-    const route = parseBootstrapMessage(value); const bytes = Buffer.byteLength(JSON.stringify(route.message));
+    let route;
+    try { route = parseBootstrapMessage(value); }
+    catch (error) { if (typeof value?.type === 'string' && value.type.startsWith('review.')) { lifecycleFailure(error); return; } throw error; }
+    if (route.channel === 'lifecycle') {
+      if (lifecyclePending >= 8) { lifecycleFailure(); return; }
+      ++lifecyclePending;
+      // The coordinator serializes review/activation authority. Its long work
+      // never owns the conversation queue or holds the proxy transition lock.
+      void Promise.resolve().then(async () => {
+        if (stopped) return;
+        if (typeof coordinator?.handle !== 'function') throw new Error('Coordinator unavailable');
+        const response = await coordinator.handle(route.message);
+        if (response !== undefined) send({ type: 'review.status', ...response });
+      }).catch(lifecycleFailure).finally(() => { --lifecyclePending; });
+      return;
+    }
+    const bytes = Buffer.byteLength(JSON.stringify(route.message));
     if (route.channel === 'conversation' && route.message.type === 'session.open') {
       const requested = route.message.threadId;
       if (requested !== null) {
@@ -123,11 +141,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     queued += bytes; if (queued > QUEUE_LIMIT) throw new Error('Input queue exceeded');
     queue = queue.then(async () => {
       if (stopped) return;
-      if (route.channel === 'lifecycle') {
-        if (typeof coordinator?.handle !== 'function') throw new Error('Coordinator unavailable');
-        const response = await coordinator.handle(route.message);
-        if (response !== undefined) send(response);
-      } else {
+      {
         if (refreshing) await refreshing;
         if (stopped) return;
         await serialize(async () => {

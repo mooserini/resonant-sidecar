@@ -20,7 +20,7 @@ export class ReviewCoordinator {
   #d; #state = null; #review = null; #tail = null; #initialized = false; #fresh = false; #busy = false; #halted = false;
   #active = null; #staged = null; #decisionHash = null; #grant = null; #proofGiven = false;
   #project = { activeVersion: {}, candidateVersion: {}, sourceHashes: {}, dependencyLock: {}, testResults: {} };
-  #os = { before: {}, verification: {}, after: {} }; #attestation = null;
+  #os = { before: {}, verification: {}, after: {} }; #attestation = null; #afterPolicy = null;
   constructor(deps = {}) {
     for (const [object, methods] of [[deps.receiptStore, ['verifyChain', 'finalizeEvent']], [deps.nonceStore, ['issue', 'consume', 'recover']], [deps.versionStore, ['resolveActiveHost', 'installVersion', 'activate', 'rollback', 'recover', 'completeActivation', 'resumePendingActivation', 'resolveRecoveredHost', 'completeRecoveredActivation']], [deps.candidateSource, ['inspect', 'stage']], [deps.runtime, ['snapshot', 'refreshPending', 'refreshRecovered', 'stopCandidate', 'restartPrevious']]]) {
       if (!object || methods.some(m => typeof object[m] !== 'function')) throw new TypeError('Trusted coordinator dependencies required');
@@ -28,6 +28,7 @@ export class ReviewCoordinator {
     if (['deterministicReview', 'codexReview', 'collectEvidence', 'ownershipPolicy'].some(k => typeof deps[k] !== 'function')) throw new TypeError('Trusted coordinator dependencies required');
     if (sha256Json(deps.policy ?? POLICY) !== POLICY_DIGEST) throw new TypeError('Unsupported coordinator policy');
     this.#d = { ...deps, policy: clone(POLICY), reviewId: deps.reviewId ?? randomUUID };
+    this.#d.versionStore.bindReceiptStore(this.#d.receiptStore);
   }
   get state() { return this.#state; }
   async #exclusive(operation) {
@@ -109,6 +110,7 @@ export class ReviewCoordinator {
     const evidence = sanitizeEvidence(await this.#d.collectEvidence(clone(policy)), POLICY);
     this.#os[phase] = evidence;
     if (!verifyOwnershipTopology(evidence, policy).passed) throw new Error('Ownership topology failed');
+    if (phase === 'after') this.#afterPolicy = policy;
     return evidence;
     } catch { throw new CustodyError('Ownership evidence failed'); }
   }
@@ -202,10 +204,13 @@ export class ReviewCoordinator {
         await this.#integrity(); await this.#d.versionStore.activate(d);
         await this.#integrity();
         const runtime = await this.#d.runtime.refreshPending(d);
-        await this.#postRefresh(runtime, proof);
-        await this.#integrity(); await this.#d.versionStore.completeActivation(d);
-        await this.#move('activated'); return this.#view();
-      } catch (error) { if (this.#halted) throw error; return this.#rollback('activation-operation-failed'); }
+        const authorization = await this.#postRefresh(runtime, proof);
+        await this.#integrity();
+        const binding = boundRecovery(proof);
+        await this.#d.versionStore.completeReviewedActivation(binding, authorization, () => this.#move('activated'));
+        await this.#d.versionStore.verifyCompletedActivation(binding);
+        return this.#view();
+      } catch (error) { if (this.#halted || this.#state === 'activated') throw error; return this.#rollback('activation-operation-failed'); }
       finally { this.#grant = null; }
     });
   }
@@ -215,6 +220,7 @@ export class ReviewCoordinator {
     await this.#evidence('after', snapshot);
     const live = this.#d.runtime.snapshot();
     for (const k of ['pid', 'digest', 'reviewId', 'threadId']) if (snapshot[k] !== live?.[k]) throw new Error('Runtime changed during post-refresh evidence');
+    return { runtime: Object.fromEntries(['pid', 'digest', 'reviewId', 'threadId'].map(k => [k, snapshot[k]])), ownershipPolicy: clone(this.#afterPolicy), osEvidence: clone(this.#os) };
   }
   async #rollback(reasonCode) {
     if (this.#state === 'human-accepted') await this.#move('activating');
@@ -224,7 +230,11 @@ export class ReviewCoordinator {
       await this.#integrity(); await this.#d.runtime.stopCandidate();
       // recover handles partial journals and an already-restored bootstrap.
       // Neither recovery nor rollback verifies the failed candidate first.
-      await this.#integrity(); await this.#d.versionStore.recover();
+      await this.#integrity();
+      try { await this.#d.versionStore.rollback({ reviewId: this.#review.reviewId, candidateDigest: this.#review.candidateDigest, failureRef: 'activation-failed' }); }
+      catch { await this.#d.versionStore.recover(); }
+      const pin = await this.#d.versionStore.resolveActiveHost();
+      if (pin.digest !== this.#review.activeDigest) throw new Error('Previous pin was not restored');
       await this.#integrity();
       const restored = await this.#d.runtime.restartPrevious();
       if (restored.digest !== this.#review.activeDigest) throw new Error('Previous runtime mismatch');
@@ -245,6 +255,11 @@ export class ReviewCoordinator {
     });
   }
   resumePendingActivation() { return this.#exclusive(async () => {
+    if (this.#state === 'activated') {
+      await this.#d.versionStore.recover();
+      await this.#d.versionStore.verifyCompletedActivation({ ...this.#review, nonceDigest: this.#decisionHash });
+      return this.#view();
+    }
     if (!this.#state || terminalReview(this.#state)) return this.#view();
     if (this.#fresh) throw new Error('Recovery requires a restarted coordinator');
     if (this.#state === 'eligible') { await this.#move('rejected', 'restart-decision-expired'); return this.#view(); }
@@ -258,10 +273,11 @@ export class ReviewCoordinator {
       await this.#d.versionStore.resumePendingActivation(binding);
       await this.#integrity();
       const runtime = await this.#d.runtime.refreshRecovered(binding);
-      await this.#postRefresh(runtime, proof);
-      await this.#integrity(); await this.#d.versionStore.completeRecoveredActivation(binding);
-      await this.#move('activated'); return this.#view();
-    } catch (error) { if (this.#halted) throw error; return this.#rollback('activation-interrupted'); }
+      const authorization = await this.#postRefresh(runtime, proof);
+      await this.#integrity(); await this.#d.versionStore.completeRecoveredActivation(binding, authorization, () => this.#move('activated'));
+      await this.#d.versionStore.verifyCompletedActivation(binding);
+      return this.#view();
+    } catch (error) { if (this.#halted || this.#state === 'activated') throw error; return this.#rollback('activation-interrupted'); }
   }); }
   handle(value) {
     if (!value || Object.getPrototypeOf(value) !== Object.prototype) return Promise.reject(new Error('Invalid lifecycle request'));

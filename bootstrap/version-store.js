@@ -5,6 +5,8 @@ import { assertBundleManifest, buildBundleManifest } from '../review/bundle-mani
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { assertPin, snapshotDecision, snapshotRecoveryBinding, recoverInterruptedActivation, samePin } from './recovery-state.js';
 import { withRuntimeLock } from './runtime-lock.js';
+import { verifyOwnershipTopology } from '../review/process-ownership.js';
+import { sanitizeEvidence } from '../review/redaction.js';
 
 const MAX_FILE = 8 * 1024 * 1024;
 const MAX_BUNDLE = 32 * 1024 * 1024;
@@ -52,8 +54,18 @@ function writeNew(p, bytes, mode = 0o600) {
   try { fs.writeFileSync(fd, bytes); fs.fchmodSync(fd, mode); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+function completionWitness(binding, authorization) {
+  const a = JSON.parse(canonicalJson(authorization));
+  if (!a || Object.keys(a).sort().join(',') !== 'osEvidence,ownershipPolicy,runtime' || Object.keys(a.runtime ?? {}).sort().join(',') !== 'digest,pid,reviewId,threadId' || Object.keys(a.osEvidence ?? {}).sort().join(',') !== 'after,before,verification') fail('Completion authorization required');
+  const r = a.runtime; const p = a.ownershipPolicy;
+  if (r.digest !== binding.candidateDigest || r.reviewId !== binding.reviewId || r.threadId !== binding.threadId || !Number.isSafeInteger(r.pid) || r.pid < 1 || p.phase !== 'after' || p.chromeExited || p.processes?.find(v => v.name === 'active-host')?.pid !== r.pid || !verifyOwnershipTopology(a.osEvidence.after, p).passed) fail('Invalid completion authorization');
+  const evidence = sanitizeEvidence(a.osEvidence);
+  const osEvidenceHash = sha256Json(Object.fromEntries(['before', 'verification', 'after'].map(phase => [`os/${phase}/evidence.json`, sha256Bytes(canonicalJson(evidence[phase]))])));
+  return { schemaVersion: 1, binding, ...a, osEvidenceHash };
+}
+
 export class VersionStore {
-  #project; #root; #device; #consume; #verifyConsumed; #clock; #recovered = null; #pending = null; #runtimeGuard = null;
+  #project; #root; #device; #consume; #verifyConsumed; #clock; #receipts = null; #recovered = null; #pending = null; #runtimeGuard = null;
   constructor({ projectRoot, consumeDecision, verifyConsumedDecision, clock = Date.now } = {}) {
     this.#project = concrete(projectRoot);
     this.#root = path.join(projectRoot, 'runtime');
@@ -64,7 +76,7 @@ export class VersionStore {
     concrete(this.#project);
     if (!exists(this.#root)) { try { fs.mkdirSync(this.#root, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') throw e; } syncDir(this.#project); }
     this.#device = privatePath(this.#root, true).dev;
-    for (const name of ['active', 'previous', 'versions', 'quarantine', 'history', 'decisions', 'installations']) {
+    for (const name of ['active', 'previous', 'versions', 'quarantine', 'history', 'decisions', 'installations', 'completions']) {
       const dir = path.join(this.#root, name);
       if (!exists(dir)) { try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') throw e; } syncDir(this.#root); }
       privatePath(dir, true, this.#device);
@@ -228,6 +240,7 @@ export class VersionStore {
   }
   async completeActivation(decision) {
     decision = snapshotDecision(decision);
+    if (this.#receipts) fail('Reviewed completion authorization required');
     return this.#locked(async () => {
       const state = this.#state();
       if (state?.phase !== 'pending-verification' || this.#pending !== state.decisionHash || sha256Bytes(decision.nonce) !== state.decisionHash || decision.reviewId !== state.candidate.reviewId || decision.candidateDigest !== state.candidate.digest || !samePin(this.#pin('active'), state.candidate)) fail('Activation completion mismatch');
@@ -252,13 +265,21 @@ export class VersionStore {
   async rollback(failure) {
     return this.#locked(async () => {
       const state = this.#state();
-      if (!state || !['pending-verification', 'rolling-back'].includes(state.phase) || failure?.reviewId !== state.candidate.reviewId || failure?.candidateDigest !== state.candidate.digest || !/^[A-Za-z0-9_-]{1,128}$/.test(failure?.failureRef ?? '')) fail('Rollback failure identity mismatch');
+      if (!state || !['prepared', 'previous-written', 'active-written', 'pending-verification', 'rolling-back', 'complete'].includes(state.phase) || failure?.reviewId !== state.candidate.reviewId || failure?.candidateDigest !== state.candidate.digest || !/^[A-Za-z0-9_-]{1,128}$/.test(failure?.failureRef ?? '')) fail('Rollback failure identity mismatch');
+      if (await this.#committedCompletion(state)) fail('Committed activation cannot roll back');
       return this.#rollback(state, failure.failureRef);
     });
   }
   async recover() {
     return this.#locked(async () => {
       const state = this.#state();
+      if (state && await this.#committedCompletion(state)) {
+        if (!samePin(this.#pin('active'), state.candidate)) fail('Committed activation pin mismatch');
+        await this.#version(state.candidate);
+        if (state.phase !== 'complete') { state.phase = 'complete'; this.#save(state); }
+        this.#pending = null; this.#recovered = null;
+        return { action: 'completed', candidate: state.candidate };
+      }
       if (recoverInterruptedActivation(state).action === 'none') return { action: 'none' };
       return this.#rollback(state, 'interrupted-activation');
     });
@@ -266,6 +287,36 @@ export class VersionStore {
   bindRuntimeGuard(guard) {
     if (this.#runtimeGuard || typeof guard !== 'function') fail('Runtime guard already bound or invalid');
     this.#runtimeGuard = guard;
+  }
+  bindReceiptStore(receipts) {
+    if (!receipts || typeof receipts.verifyChain !== 'function' || (this.#receipts && this.#receipts !== receipts)) fail('Invalid receipt custody binding');
+    this.#receipts = receipts;
+  }
+  async #committedCompletion(state) {
+    const file = path.join(this.#root, 'completions', `${state.decisionHash}.json`);
+    if (!this.#receipts) { if (exists(file)) fail('Receipt custody required for completion recovery'); return null; }
+    const chain = await this.#receipts.verifyChain();
+    if (chain.state !== 'intact') fail('Completion receipt custody broken');
+    const receipt = chain.receipts.findLast(r => r.reviewId === state.candidate.reviewId && r.eventType === 'activated');
+    if (!receipt) return null;
+    if (!exists(file)) fail('Committed activation witness missing');
+    const witness = readCanonical(file, this.#device);
+    const binding = snapshotRecoveryBinding(witness.binding);
+    const observed = completionWitness(binding, { runtime: witness.runtime, ownershipPolicy: witness.ownershipPolicy, osEvidence: witness.osEvidence });
+    if (canonicalJson(witness) !== canonicalJson(observed) || binding.nonceDigest !== state.decisionHash || binding.reviewId !== state.candidate.reviewId || binding.candidateDigest !== state.candidate.digest || receipt.humanDecisionRef !== state.decisionHash || receipt.candidateBundleDigest !== state.candidate.digest || receipt.policySnapshotHash !== binding.policyDigest || receipt.activeBundleDigest !== state.previous?.digest || receipt.osEvidenceHash !== witness.osEvidenceHash) fail('Committed activation authorization mismatch');
+    const consumed = readCanonical(path.join(this.#root, 'decisions', `${state.decisionHash}.json`), this.#device);
+    if (canonicalJson(consumed) !== canonicalJson({ candidate: state.candidate, policyDigest: binding.policyDigest })) fail('Committed activation consumption mismatch');
+    return receipt;
+  }
+  async verifyCompletedActivation({ reviewId, candidateDigest, nonceDigest }) {
+    return this.#locked(async () => {
+      const state = this.#state();
+      if (state?.phase !== 'complete' || state.candidate.reviewId !== reviewId || state.candidate.digest !== candidateDigest || state.decisionHash !== nonceDigest || !samePin(this.#pin('active'), state.candidate)) fail('Activation is not durably complete');
+      const receipt = await this.#committedCompletion(state);
+      if (!receipt) fail('Canonical activation receipt required');
+      await this.#version(state.candidate);
+      return { phase: 'complete', receiptHash: receipt.receiptHash };
+    });
   }
   async resolvePendingHost(decision) {
     decision = snapshotDecision(decision);
@@ -308,14 +359,35 @@ export class VersionStore {
       return this.#version(state.candidate);
     });
   }
-  async completeRecoveredActivation(binding) {
+  async #completeReviewed(binding, authorization, finalizeActivation, recovered) {
+    if (!this.#runtimeGuard) fail('Owning runtime guard required');
+    if (!this.#receipts || typeof finalizeActivation !== 'function' || !authorization) fail('Completion authorization required');
+    if (this.#pending !== binding.nonceDigest || (recovered && canonicalJson(this.#recovered) !== canonicalJson(binding))) fail('Pending recovery not rehydrated');
+    const state = await this.#recoveryBinding(binding);
+    const witness = completionWitness(binding, authorization);
+    if (!this.#runtimeGuard({ ...state.candidate, decisionHash: state.decisionHash, pid: witness.runtime.pid, threadId: witness.runtime.threadId })) fail('Pending runtime refresh required before completion');
+    const file = path.join(this.#root, 'completions', `${state.decisionHash}.json`);
+    if (exists(file)) {
+      if (canonicalJson(readCanonical(file, this.#device)) !== canonicalJson(witness)) fail('Completion witness changed');
+    } else { writeNew(file, canonicalJson(witness) + '\n', 0o400); syncDir(path.dirname(file)); }
+    // The witness is durable before the canonical event. An interrupted append
+    // leaves pending state; a committed event is idempotently reconciled by recover.
+    let receipt = await this.#committedCompletion(state);
+    if (!receipt) { await finalizeActivation(); receipt = await this.#committedCompletion(state); }
+    if (!receipt) fail('Canonical activation receipt required');
+    state.phase = 'complete'; this.#save(state); this.#pending = null; this.#recovered = null;
+    return { phase: 'complete', receiptHash: receipt.receiptHash };
+  }
+  async completeReviewedActivation(binding, authorization, finalizeActivation) {
     binding = snapshotRecoveryBinding(binding);
-    return this.#locked(async () => {
-      if (canonicalJson(this.#recovered) !== canonicalJson(binding) || this.#pending !== binding.nonceDigest) fail('Pending recovery not rehydrated');
-      const state = await this.#recoveryBinding(binding);
-      if (this.#runtimeGuard && !this.#runtimeGuard({ ...state.candidate, decisionHash: state.decisionHash })) fail('Pending runtime refresh required before completion');
-      state.phase = 'complete'; this.#save(state); this.#pending = null; this.#recovered = null;
-      return { phase: 'complete' };
-    });
+    authorization = JSON.parse(canonicalJson(authorization));
+    return this.#locked(() => this.#completeReviewed(binding, authorization, finalizeActivation, false));
+  }
+  async completeRecoveredActivation(binding, authorization, finalizeActivation) {
+    binding = snapshotRecoveryBinding(binding);
+    if (!this.#runtimeGuard) fail('Owning runtime guard required');
+    if (!authorization) fail('Completion authorization required');
+    authorization = JSON.parse(canonicalJson(authorization));
+    return this.#locked(() => this.#completeReviewed(binding, authorization, finalizeActivation, true));
   }
 }

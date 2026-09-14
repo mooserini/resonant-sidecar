@@ -47,6 +47,42 @@ async function waitFor(predicate) {
   while (!predicate()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 20)); }
 }
 
+test('long review dispatch never blocks normal turns or emergency interrupt', async () => {
+  const input = new PassThrough(); const output = new PassThrough(); const sent = [];
+  let release; let entered = false; let closed = false;
+  const pending = new Promise(resolve => { release = resolve; });
+  const runtime = await runBootstrap({ input, output, signals: new EventEmitter(),
+    store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: 'a'.repeat(64), reviewId: 'first' }) },
+    coordinator: { handle: async () => { entered = true; await pending; return { state: 'eligible' }; } },
+    proxyFactory: () => ({ pid: 103, send: m => sent.push(m), close: async () => { closed = true; } }),
+  });
+  try {
+    input.write(encodeNativeMessage({ type: 'review.start' }));
+    await waitFor(() => entered);
+    input.write(encodeNativeMessage({ type: 'turn.start', text: 'still usable' }));
+    input.write(encodeNativeMessage({ type: 'turn.interrupt' }));
+    await waitFor(() => sent.length === 2);
+    assert.deepEqual(sent.map(m => m.type), ['turn.start', 'turn.interrupt']); assert.equal(closed, false);
+  } finally { release(); await runtime.close(); }
+});
+for (const problem of ['custody', 'review', 'invalid-request']) test(`${problem} lifecycle failure is framed without closing healthy A`, async () => {
+  const input = new PassThrough(); const output = new PassThrough(); const messages = []; const sent = []; let closed = false;
+  const decoder = new NativeMessageDecoder(m => messages.push(m)); output.on('data', chunk => decoder.push(chunk));
+  const runtime = await runBootstrap({ input, output, signals: new EventEmitter(),
+    store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: 'a'.repeat(64), reviewId: 'first' }) },
+    coordinator: { handle: async () => { const e = new Error('private details'); e.name = problem === 'custody' ? 'CustodyError' : 'Error'; throw e; } },
+    proxyFactory: () => ({ pid: 103, send: m => sent.push(m), close: async () => { closed = true; } }),
+  });
+  try {
+    input.write(encodeNativeMessage({ type: 'turn.start', text: 'before' })); await waitFor(() => sent.length === 1);
+    input.write(encodeNativeMessage({ type: 'review.start', ...(problem === 'invalid-request' ? { path: '/tmp' } : {}) }));
+    await waitFor(() => messages.length === 1);
+    assert.deepEqual(messages, [{ type: 'review.failed', state: problem === 'custody' ? 'custody-broken' : 'review-failed' }]);
+    assert.equal(closed, false);
+    input.write(encodeNativeMessage({ type: 'turn.interrupt' })); await waitFor(() => sent.length === 2);
+  } finally { await runtime.close(); }
+});
+
 for (const exit of ['disconnect', 'SIGTERM']) {
   test(`${exit} reaps the actual active host and a Codex descendant ignoring SIGTERM, with no TCP listener`, async t => {
     const f = await runtimeFixture(t); const nodePath = await realpath(process.execPath);
