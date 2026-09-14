@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { constants } from 'node:fs';
-import { mkdir, readdir, lstat, open, rename, chmod, rmdir } from 'node:fs/promises';
+import { mkdir, readdir, lstat, open, rename, rmdir } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -77,8 +77,13 @@ async function readRegular(file) {
   const metadata = await lstat(file);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > 4 * 1024 * 1024) throw new CustodyError('nonregular evidence');
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try { return await handle.readFile('utf8'); } finally { await handle.close(); }
+  try {
+    const opened = await handle.stat();
+    schema(opened.isFile() && opened.nlink === 1 && opened.dev === metadata.dev && opened.ino === metadata.ino);
+    return await handle.readFile();
+  } finally { await handle.close(); }
 }
+function decodeUtf8(bytes) { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
 async function writeExclusive(file, bytes) {
   const handle = await open(file, 'wx', 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
@@ -90,7 +95,46 @@ async function ensureDirectory(directory) {
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new CustodyError('invalid directory');
 }
 async function immutableFlag(directory) {
-  if (process.platform === 'darwin') await promisify(execFile)('/usr/bin/chflags', ['-R', 'uchg', directory], { timeout: 10000 });
+  if (process.platform === 'darwin') await promisify(execFile)('/usr/bin/chflags', ['-R', '-P', 'uchg', directory], { timeout: 10000 });
+}
+
+async function openSealHandles(directory, files) {
+  const entries = [];
+  // Hold each original inode across rename. Later fchmod never resolves a path.
+  const directories = ['', 'project', 'os', ...PHASES.map(phase => `os/${phase}`)];
+  try {
+    for (const name of [...directories, ...files]) {
+      const target = path.join(directory, name);
+      const isDirectory = directories.includes(name);
+      const metadata = await lstat(target);
+      schema(!metadata.isSymbolicLink() && (isDirectory ? metadata.isDirectory() : metadata.isFile() && metadata.nlink === 1));
+      // Recheck every held ancestor before opening a child; never traverse a link.
+      for (const entry of entries.filter(entry => entry.isDirectory && (entry.name === '' || name.startsWith(`${entry.name}/`)))) {
+        const current = await lstat(path.join(directory, entry.name));
+        schema(current.isDirectory() && !current.isSymbolicLink() && current.dev === entry.metadata.dev && current.ino === entry.metadata.ino);
+      }
+      const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | (isDirectory ? constants.O_DIRECTORY : constants.O_NONBLOCK));
+      entries.push({ name, handle, metadata, isDirectory });
+      const opened = await handle.stat();
+      schema(opened.dev === metadata.dev && opened.ino === metadata.ino && (isDirectory ? opened.isDirectory() : opened.isFile() && opened.nlink === 1));
+    }
+    return entries;
+  } catch (error) {
+    await Promise.all(entries.map(entry => entry.handle.close()));
+    throw error;
+  }
+}
+
+async function sealHeldReceipt(directory, entries) {
+  // Detect swaps before sealing, then operate exclusively on held handles.
+  for (const entry of entries) {
+    const current = await lstat(path.join(directory, entry.name));
+    schema(!current.isSymbolicLink() && current.dev === entry.metadata.dev && current.ino === entry.metadata.ino);
+  }
+  for (const entry of [...entries].reverse()) {
+    await entry.handle.chmod(entry.isDirectory ? 0o555 : 0o444);
+    await entry.handle.sync();
+  }
 }
 async function walk(directory, relative = '', sealed = false) {
   if (!['', 'project', 'os', ...PHASES.map(phase => `os/${phase}`)].includes(relative)) throw new CustodyError('unexpected evidence directory');
@@ -128,21 +172,21 @@ export class ReceiptStore {
       files[name] = await readRegular(path.join(directory, name));
     }
     for (const name of names.filter(name => name.endsWith('.json'))) {
-      const parsed = JSON.parse(files[name]);
-      schema(canonicalJson(parsed) === files[name]);
+      const parsed = JSON.parse(decodeUtf8(files[name]));
+      schema(Buffer.from(canonicalJson(parsed), 'utf8').equals(files[name]));
       if (name !== 'policy-snapshot.json' && parsed !== null) sanitizeEvidence(parsed, this.#policy);
     }
-    const receipt = JSON.parse(files['receipt.json']);
+    const receipt = JSON.parse(decodeUtf8(files['receipt.json']));
     assertReceipt(receipt, this.#policy);
     schema(pending || directoryName(receipt) === path.basename(directory));
-    assertAttestation(JSON.parse(files['attestation.json']));
-    schema(files['report.md'] === report(receipt));
-    schema(sha256Json(JSON.parse(files['policy-snapshot.json'])) === POLICY_HASH);
+    assertAttestation(JSON.parse(decodeUtf8(files['attestation.json'])));
+    schema(files['report.md'].equals(Buffer.from(report(receipt), 'utf8')));
+    schema(sha256Json(JSON.parse(decodeUtf8(files['policy-snapshot.json']))) === POLICY_HASH);
     schema(receipt.policySnapshotHash === sha256Bytes(files['policy-snapshot.json']));
     schema(receipt.projectEvidenceHash === hashFiles(files, 'project'));
     schema(receipt.osEvidenceHash === hashFiles(files, 'os'));
     const receiptHash = sha256Bytes(files['receipt.json']);
-    schema(files['receipt.sha256'] === `${receiptHash}\n`);
+    schema(files['receipt.sha256'].equals(Buffer.from(`${receiptHash}\n`, 'utf8')));
     return { ...receipt, receiptHash, directory };
   }
   async #chain() {
@@ -174,7 +218,7 @@ export class ReceiptStore {
       }
       const headInfo = await info(path.join(this.#root, '.custody-head'));
       if (headInfo) {
-        const head = JSON.parse(await readRegular(path.join(this.#root, '.custody-head')));
+        const head = JSON.parse(decodeUtf8(await readRegular(path.join(this.#root, '.custody-head'))));
         exact(head, ['count', 'tailHash']);
         schema(head.count === receipts.length && head.tailHash === tailHash);
       } else schema(receipts.length === 0 && !pendingInfo);
@@ -247,19 +291,28 @@ export class ReceiptStore {
       }
       for (const name of [...PHASES.map(phase => `os/${phase}`), 'os', 'project', '']) await syncDirectory(path.join(pending, name));
       await this.#readReceipt(pending, true);
-      const headTemporary = path.join(this.#root, `.head-next-${receiptId}`);
-      await writeExclusive(headTemporary, canonicalJson({ count: chain.count + 1, tailHash: receiptHash }));
-      await this.#rename(headTemporary, path.join(this.#root, '.custody-head'));
-      await syncDirectory(this.#root);
-      const directory = path.join(this.#root, directoryName(receipt));
-      if (await info(directory)) throw new CustodyError('receipt target already exists');
-      await this.#rename(pending, directory);
-      // Only this newly finalized receipt is touched; prior evidence is never changed.
-      for (const name of Object.keys(files)) await chmod(path.join(directory, name), 0o444);
-      for (const name of [...PHASES.map(phase => `os/${phase}`), 'os', 'project', '']) await chmod(path.join(directory, name), 0o555);
-      await syncDirectory(this.#root);
-      try { await this.#immutable(directory); } catch { /* Best effort; read-only modes and hash verification remain required. */ }
-      const result = { ...receipt, receiptHash, directory };
+      const sealHandles = await openSealHandles(pending, Object.keys(files));
+      let result;
+      try {
+        const headTemporary = path.join(this.#root, `.head-next-${receiptId}`);
+        await writeExclusive(headTemporary, canonicalJson({ count: chain.count + 1, tailHash: receiptHash }));
+        await this.#rename(headTemporary, path.join(this.#root, '.custody-head'));
+        await syncDirectory(this.#root);
+        const directory = path.join(this.#root, directoryName(receipt));
+        if (await info(directory)) throw new CustodyError('receipt target already exists');
+        await this.#rename(pending, directory);
+        await this.#readReceipt(directory, true);
+        await sealHeldReceipt(directory, sealHandles);
+        await this.#readReceipt(directory);
+        await syncDirectory(this.#root);
+        try { await this.#immutable(directory); } catch { /* Best effort; read-only modes and hash verification remain required. */ }
+        result = await this.#readReceipt(directory);
+      } catch (error) {
+        await this.#markBroken();
+        throw error;
+      } finally {
+        await Promise.all(sealHandles.map(entry => entry.handle.close()));
+      }
       // This convenience pointer is rebuildable; its failure cannot undo custody.
       try { await this.#pointer({ receipts: [...chain.receipts, result] }); } catch { /* Resolve can rebuild it later. */ }
       if (rejected) throw new SanitizationError();

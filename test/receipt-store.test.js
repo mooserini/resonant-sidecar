@@ -221,3 +221,67 @@ test('verification serializes with appends and never latches an in-progress chec
   assert.equal(interruptedRead.state, 'busy');
   assert.equal((await store.verifyChain()).state, 'intact');
 });
+
+test('invalid UTF-8 substitution cannot preserve a canonical evidence hash via replacement decoding', async t => {
+  const { store } = await fixture(t);
+  const input = event();
+  input.projectEvidence.testResults = { summary: '\uFFFD' };
+  const receipt = await store.finalizeEvent(input);
+  const target = path.join(receipt.directory, 'project/test-results.json');
+  const original = await readFile(target);
+  const marker = original.indexOf(Buffer.from('\uFFFD'));
+  assert.ok(marker >= 0);
+  const changed = Buffer.concat([original.subarray(0, marker), Buffer.from([0xff]), original.subarray(marker + 3)]);
+  assert.notDeepEqual(changed, original);
+  assert.equal(changed.toString('utf8'), original.toString('utf8'));
+  await chmod(target, 0o600); await writeFile(target, changed); await chmod(target, 0o444);
+  assert.equal((await store.verifyChain()).state, 'custody-broken');
+  await assert.rejects(() => store.finalizeEvent(event()), /custody/i);
+});
+
+test('nested environment evidence yields only fixed sanitized failure metadata', async t => {
+  const { root, store } = await fixture(t);
+  const input = event();
+  input.projectEvidence.testResults = { checks: [{ name: 'AWS_SECRET_ACCESS_KEY', actual: 'SYNTHETIC-CUSTODY-PROBE' }] };
+  await assert.rejects(() => store.finalizeEvent(input), /sanitization/i);
+  const chain = await store.verifyChain();
+  assert.equal(chain.state, 'intact');
+  assert.equal(chain.count, 1);
+  assert.equal(chain.receipts[0].outcome, 'sanitization-failed');
+  assert.equal(chain.receipts[0].reviewId, 'sanitization-failure');
+  async function scan(dir) {
+    for (const item of await readdir(dir, { withFileTypes: true })) {
+      const target = path.join(dir, item.name);
+      if (item.isDirectory()) await scan(target);
+      else assert.doesNotMatch(await readFile(target, 'utf8'), /SYNTHETIC-CUSTODY-PROBE|AWS_SECRET_ACCESS_KEY/);
+    }
+  }
+  await scan(root);
+});
+
+for (const swap of ['file', 'parent-directory']) {
+  test(`post-rename ${swap} symlink substitution cannot chmod unrelated material or succeed`, async t => {
+    let outside;
+    const { project, store } = await fixture(t, { rename: async (from, to) => {
+      await rename(from, to);
+      if (from.includes(`${path.sep}.pending${path.sep}`)) {
+        if (swap === 'file') {
+          await rm(path.join(to, 'report.md'));
+          await symlink(path.join(outside, 'unrelated.txt'), path.join(to, 'report.md'));
+        } else {
+          await rename(path.join(to, 'project'), path.join(to, 'displaced-project'));
+          await symlink(outside, path.join(to, 'project'));
+        }
+      }
+    } });
+    outside = path.join(project, 'outside');
+    await mkdir(outside, { mode: 0o700 });
+    for (const name of ['unrelated.txt', 'active-version.json', 'candidate-version.json', 'source-hashes.json', 'dependency-lock.json', 'test-results.json']) await writeFile(path.join(outside, name), 'unrelated', { mode: 0o600 });
+    const result = await Promise.allSettled([store.finalizeEvent(event())]);
+    assert.equal((await stat(path.join(outside, swap === 'file' ? 'unrelated.txt' : 'active-version.json'))).mode & 0o777, 0o600);
+    assert.equal((await stat(outside)).mode & 0o777, 0o700);
+    assert.equal(await readFile(path.join(outside, 'unrelated.txt'), 'utf8'), 'unrelated');
+    assert.equal(result[0].status, 'rejected');
+    assert.equal((await store.verifyChain()).state, 'custody-broken');
+  });
+}

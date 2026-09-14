@@ -15,7 +15,8 @@ Construct `ReceiptStore` with an absolute, explicit project-local `review-receip
 root. It defaults to the exact `policy/review-policy.v1.json` snapshot and rejects
 different policies. Trusted adapters can inject `clock`, `randomUUID`, `rename`,
 and `immutable` (an asynchronous function receiving the finalized directory).
-The default immutable adapter runs `/usr/bin/chflags -R uchg` on macOS only.
+The default immutable adapter runs `/usr/bin/chflags -R -P uchg` on macOS only,
+explicitly refusing symbolic-link traversal.
 
 `finalizeEvent` consumes:
 
@@ -39,9 +40,12 @@ is known. The ledger validates event names against the policy; lifecycle
 transition authorization belongs to the trusted orchestrator. Outcomes are policy
 state names or `passed`, `failed`, or `sanitization-failed`.
 
-Structured fields are allowlisted in `review/redaction.js`. Raw environments,
-process output, page/conversation text fields, credential literals, unknown
-fields, getters, cyclic objects, and unrelated home paths are rejected. All
+Structured fields are allowlisted in `review/redaction.js`; check records also
+use contextual field and type schemas, with scalar expected/actual values.
+Named records reject environment-style identifiers, common environment names,
+and names denoting credentials or excluded raw data. Recognized raw-environment
+representations, process-output/page/conversation fields, credential patterns,
+unknown fields, getters, cyclic objects, and unrelated home paths are rejected. All
 home-absolute paths are currently excluded: producers must use project-relative
 paths and sanitized file identities. `argv`/`command` arrays must exactly match a
 trusted policy test command. Attestation prose is bounded and scanned, but its
@@ -79,7 +83,9 @@ when its injected clock repeats or moves backward.
   receipt.sha256
 ```
 
-JSON uses `review/canonical-json.js` with no trailing newline. `receipt.sha256`
+JSON uses `review/canonical-json.js` with no trailing newline. Verification reads
+Buffers, rejects invalid UTF-8, compares exact canonical encoded bytes, and hashes
+the actual persisted bytes. `receipt.sha256`
 is the SHA-256 of the exact `receipt.json` bytes followed by a newline. A receipt
 links to the previous receipt's exact hash. `policySnapshotHash` hashes the exact
 canonical policy bytes. `projectEvidenceHash` hashes a canonical map from each
@@ -91,8 +97,12 @@ safe receipt metadata; callers cannot supply raw Markdown.
 
 Finalization writes exclusive owner-only files under `.pending/<uuid>`, flushes
 files and directories, verifies schema/redaction/hash closure, advances the
-custody witness, and atomically renames the completed directory. New final files
-become `0444`, directories `0555`, with best-effort macOS user-immutable flags.
+custody witness, and atomically renames the completed directory. Sealing holds
+verified no-follow file and directory handles across rename, checks inode and
+ancestor identities, and changes permissions through those handles. It never
+uses pathname chmod. New final files become `0444`, directories `0555`, with
+best-effort macOS user-immutable flags. The sealed layout and bytes are reverified
+before and after the immutable adapter, before finalization can return success.
 Verification also checks the required modes and refuses symlinks, hard-linked
 files, extra files/directories, malformed schemas, and altered canonical bytes.
 There is no application API for modifying, deleting, or repairing old receipts.

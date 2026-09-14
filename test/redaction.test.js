@@ -44,3 +44,23 @@ test('rejects accessors without executing them and rejects cyclic/non-JSON evide
     assert.throws(() => sanitizeEvidence(value, policy), /sanitization/);
   }
 });
+
+test('rejects environment and secret names in nested named-value evidence records', () => {
+  for (const name of ['AWS_SECRET_ACCESS_KEY', 'HOME', 'PATH', 'authorization', 'api-key', 'session_cookie', 'connectionString']) {
+    assert.throws(() => sanitizeEvidence({ checks: [{ name, actual: 'SYNTHETIC-CUSTODY-PROBE' }] }, policy), /sanitization/i);
+  }
+});
+
+test('check records validate contextual types instead of accepting generic nested values', () => {
+  for (const check of [
+    { name: 'syntax', actual: { summary: 'arbitrary nested payload' } },
+    { name: 'syntax', passed: 'yes' },
+    { name: 'syntax', exitCode: 'zero' },
+    { name: 'syntax', version: 'unexpected field in check' },
+  ]) assert.throws(() => sanitizeEvidence({ checks: [check] }, policy), /sanitization/i);
+  assert.deepEqual(sanitizeEvidence({ checks: [{ name: 'syntax', actual: 0, expected: 0, passed: true }] }, policy), { checks: [{ name: 'syntax', actual: 0, expected: 0, passed: true }] });
+});
+
+test('every check array member must be a structured record', () => {
+  for (const check of [null, true, 'syntax', ['syntax']]) assert.throws(() => sanitizeEvidence({ checks: [check] }, policy), /sanitization/i);
+});
