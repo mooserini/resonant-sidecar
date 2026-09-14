@@ -17,6 +17,8 @@ const LIFECYCLE_SCRIPTS = new Set([
   'preprepare',
   'postprepare',
   'prepublish',
+  'publish',
+  'postpublish',
   'prepublishOnly',
   'postpack',
   'preversion',

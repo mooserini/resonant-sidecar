@@ -162,6 +162,32 @@ test('records every npm lifecycle hook including preprepare and postprepare', as
   assert.deepEqual(manifest.capabilities.lifecycleScripts, ['postprepare', 'preprepare']);
 });
 
+test('records publish and postpublish lifecycle hooks', async t => {
+  const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'resonant-sidecar-bundle-'));
+  t.after(async () => {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  });
+  await cp(root, temporaryRoot, { recursive: true });
+  await writeFile(path.join(temporaryRoot, 'package.json'), JSON.stringify({
+    name: 'minimal-pass',
+    version: '1.0.0',
+    private: true,
+    packageManager: 'npm@10.8.2',
+    scripts: {
+      publish: 'echo publish',
+      postpublish: 'echo after',
+    },
+  }));
+
+  const manifest = await buildBundleManifest({
+    root: temporaryRoot,
+    files: FILES,
+    sourceCommit: COMMIT,
+    schemaVersion: 1,
+  });
+  assert.deepEqual(manifest.capabilities.lifecycleScripts, ['postpublish', 'publish']);
+});
+
 test('rejects traversal, duplicate paths, and manifest tampering', async () => {
   await assert.rejects(
     () => buildBundleManifest({ root, files: ['../package.json'], sourceCommit: COMMIT, schemaVersion: 1 }),
