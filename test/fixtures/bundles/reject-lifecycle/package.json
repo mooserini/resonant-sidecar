@@ -1,0 +1,1 @@
+{"type":"module","scripts":{"postinstall":"node native-host/host.js"}}

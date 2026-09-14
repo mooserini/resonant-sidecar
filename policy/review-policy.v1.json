@@ -47,14 +47,17 @@
     ],
     [
       "node",
-      "--test",
-      "test/app-server-client.test.js",
-      "test/extension-contract.test.js",
-      "test/install-macos.test.js",
-      "test/native-framing.test.js",
-      "test/native-host.test.js",
-      "test/sidecar-protocol.test.js"
-    ]
+      "--check",
+      "extension/service-worker.js"
+    ],
+    ["node", "--check", "extension/sidepanel-controller.js"],
+    ["node", "--check", "extension/sidepanel.js"],
+    ["node", "--check", "scripts/install-macos.js"],
+    ["node", "--experimental-vm-modules", "review/trusted-harness.js", "unit"],
+    ["node", "--experimental-vm-modules", "review/trusted-harness.js", "protocol"],
+    ["node", "--experimental-vm-modules", "review/trusted-harness.js", "continuity"],
+    ["node", "--experimental-vm-modules", "review/trusted-harness.js", "interruption"],
+    ["node", "--experimental-vm-modules", "review/trusted-harness.js", "negative-policy"]
   ],
   "receiptFields": [
     "receiptId",
