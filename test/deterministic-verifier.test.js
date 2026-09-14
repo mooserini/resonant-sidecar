@@ -60,7 +60,8 @@ test('real fixed harness passes the baseline and reports every required check', 
 });
 
 test('syntax failure is a hard failure without running candidate code', async t => {
-  const input = await setup(t, { 'native-host/sidecar-protocol.js': 'export const broken = ;' });
+  const source = await readFile(path.join(root, 'native-host/sidecar-protocol.js'), 'utf8');
+  const input = await setup(t, { 'native-host/sidecar-protocol.js': `${source}\nexport const broken = ;` });
   const result = await runDeterministicReview(input);
   assert.equal(result.passed, false);
   assert.ok(result.checks.some(check => check.reasonCode === 'syntax-failed'));

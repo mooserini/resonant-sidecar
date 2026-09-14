@@ -17,7 +17,7 @@ html, body { min-height: 100%; }
 body {
   display: grid;
   grid-template-rows: auto 1fr auto;
-  min-width: 280px;
+  min-width: 0;
   margin: 0;
   background:
     linear-gradient(rgba(116, 213, 222, 0.025) 1px, transparent 1px),
@@ -27,6 +27,7 @@ body {
 
 .masthead {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
@@ -158,10 +159,18 @@ button:disabled {
   opacity: 0.45;
 }
 
-button:focus-visible, textarea:focus-visible {
+button:focus-visible, textarea:focus-visible, #review-title:focus-visible {
   outline: 3px solid #fff;
   outline-offset: 3px;
 }
+
+[hidden] { display: none !important; }
+.review-card { margin: 1rem; padding: 0.8rem; border: 1px solid var(--amber); background: var(--panel); overflow-wrap: anywhere; }
+.review-card h2 { margin: 0; font-size: 1rem; }
+.review-card p { font-size: 0.8rem; line-height: 1.5; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.65rem; }
+.review-actions button { max-width: 100%; line-height: 1.4; }
+@media (max-width: 240px) { .actions { grid-template-columns: 1fr; } }
 
 .error {
   margin: 0 0 0.65rem;

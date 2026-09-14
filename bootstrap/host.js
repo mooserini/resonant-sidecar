@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import { parseBrowserMessage } from '../native-host/sidecar-protocol.js';
+import { parseBrowserMessage, isLifecycleMessage, createLifecycleRouter } from '../native-host/sidecar-protocol.js';
 import { BoundedDecoder, QUEUE_LIMIT, startNativeProxy, writeFrame } from './native-proxy.js';
 import { snapshotDecision, snapshotRecoveryBinding } from './recovery-state.js';
 import { sha256Bytes } from '../review/canonical-json.js';
@@ -8,14 +8,21 @@ import { sha256Bytes } from '../review/canonical-json.js';
 // trusted coordinator will own review policy and human-decision validation.
 const LIFECYCLE = new Set(['review.status', 'review.start', 'review.open-report', 'review.continue-in-codex', 'review.dismiss']);
 export function parseBootstrapMessage(value) {
-  if (value && LIFECYCLE.has(value.type)) {
-    if (Object.keys(value).length !== 1) throw new Error('Unsupported lifecycle field');
-    return { channel: 'lifecycle', message: { type: value.type } };
+  const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'type') : null;
+  if (descriptor && LIFECYCLE.has(descriptor.value) && Object.keys(value).length === 1) {
+    if (Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 1 || !descriptor.enumerable) throw new Error('Unsupported lifecycle field');
+    structuredClone(value);
+    return { channel: 'lifecycle', message: { type: descriptor.value } };
   }
-  return { channel: 'conversation', message: parseBrowserMessage(value) };
+  const message = parseBrowserMessage(value);
+  return { channel: isLifecycleMessage(message) ? 'lifecycle' : 'conversation', message };
 }
 
-export async function runBootstrap({ store, nodePath, codexPath, workspace, userHome, codexHome, coordinator, resumeActivation = null, proxyFactory = startNativeProxy, input = process.stdin, output = process.stdout, signals = process }) {
+export async function runBootstrap({ store, nodePath, codexPath, workspace, userHome, codexHome, coordinator, receiptStore, presentation, resumeActivation = null, proxyFactory = startNativeProxy, input = process.stdin, output = process.stdout, signals = process }) {
+  // Enabling visible lifecycle requires complete trusted presentation/custody
+  // wiring. A conversation/recovery-only bootstrap keeps its Task 7/8 contract.
+  let lifecycle;
+  if (receiptStore !== undefined || presentation !== undefined) lifecycle = createLifecycleRouter({ coordinator, receiptStore, presentation, send: message => send(message) });
   const resume = resumeActivation === null ? null : snapshotRecoveryBinding(resumeActivation);
   if (resume) await store.resumePendingActivation(resume);
   else await store.recover();
@@ -43,6 +50,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   const close = () => {
     if (closePromise) return closePromise;
     stopped = true; input.pause();
+    lifecycle?.close();
     refreshed = null;
     readyWait?.reject(new Error('Pending runtime refresh cancelled')); readyWait = null;
     closePromise = serialize(async () => {
@@ -132,18 +140,19 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   const decoder = new BoundedDecoder(value => {
     let route;
     try { route = parseBootstrapMessage(value); }
-    catch (error) { if (typeof value?.type === 'string' && value.type.startsWith('review.')) { lifecycleFailure(error); return; } throw error; }
+    catch (error) { if (isLifecycleMessage(value)) { if (!lifecycle) lifecycleFailure(error); return; } throw error; }
     if (route.channel === 'lifecycle') {
-      if (lifecyclePending >= 8) { lifecycleFailure(); return; }
+      if (lifecyclePending >= 8) { if (!lifecycle) lifecycleFailure(); return; }
       ++lifecyclePending;
       // The coordinator serializes review/activation authority. Its long work
       // never owns the conversation queue or holds the proxy transition lock.
       void Promise.resolve().then(async () => {
         if (stopped) return;
+        if (lifecycle) { await lifecycle.handle(route.message); return; }
         if (typeof coordinator?.handle !== 'function') throw new Error('Coordinator unavailable');
         const response = await coordinator.handle(route.message);
         if (response !== undefined) send({ type: 'review.status', ...response });
-      }).catch(lifecycleFailure).finally(() => { --lifecyclePending; });
+      }).catch(error => { if (!lifecycle) lifecycleFailure(error); }).finally(() => { --lifecyclePending; });
       return;
     }
     const bytes = Buffer.byteLength(JSON.stringify(route.message));

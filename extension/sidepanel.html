@@ -16,6 +16,18 @@
     </header>
 
     <main>
+      <section id="review-card" class="review-card" aria-labelledby="review-title" hidden>
+        <h2 id="review-title" tabindex="-1">Update available</h2>
+        <p id="review-status">Accept becomes available after verification.</p>
+        <div class="review-actions">
+          <button id="start-review" type="button">Review and Refresh</button>
+          <button id="accept-review" type="button" disabled aria-describedby="review-status">Accept and refresh</button>
+          <button id="reject-review" type="button" hidden>Reject</button>
+          <button id="open-report" type="button" hidden>Open review report</button>
+          <button id="open-desktop" type="button" hidden>Continue in Codex</button>
+          <button id="dismiss-review" type="button" hidden>Dismiss</button>
+        </div>
+      </section>
       <ol id="transcript" class="transcript" aria-label="Conversation"></ol>
     </main>
 

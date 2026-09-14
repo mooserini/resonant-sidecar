@@ -2,7 +2,7 @@
 
 import { AppServerClient } from './app-server-client.js';
 import { NativeMessageDecoder, encodeNativeMessage } from './native-framing.js';
-import { parseBrowserMessage } from './sidecar-protocol.js';
+import { parseBrowserMessage, isLifecycleMessage } from './sidecar-protocol.js';
 
 function parseArgs() {
   const encoded = process.env.RESONANT_CODEX_ARGS;
@@ -41,13 +41,20 @@ appServer.on('event', event => {
     return;
   }
   if (event.type === 'process.error') {
-    send({ type: 'error', message: event.message });
+    send({ type: 'error', message: 'Native runtime unavailable' });
+    return;
+  }
+  if (event.type === 'error' || event.type === 'protocol.error') {
+    send({ type: event.type, message: 'Native runtime unavailable' });
     return;
   }
   send(event);
 });
 
 async function handleBrowserMessage(value) {
+  // Only the stable trusted bootstrap may route review/refresh authority.
+  // This replaceable child handles the unchanged conversation protocol alone.
+  if (isLifecycleMessage(value)) throw new TypeError('Unsupported browser message type');
   const message = parseBrowserMessage(value);
 
   if (message.type === 'session.open') {
@@ -68,14 +75,14 @@ let messageQueue = Promise.resolve();
 const decoder = new NativeMessageDecoder(value => {
   messageQueue = messageQueue
     .then(() => handleBrowserMessage(value))
-    .catch(error => send({ type: 'error', message: safeError(error) }));
+    .catch(() => send({ type: 'error', message: 'Unsupported browser message type or unavailable runtime' }));
 });
 
 process.stdin.on('data', chunk => {
   try {
     decoder.push(chunk);
   } catch (error) {
-    send({ type: 'error', message: safeError(error) });
+    send({ type: 'error', message: 'Invalid native message' });
   }
 });
 

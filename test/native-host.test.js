@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { PassThrough } from 'node:stream';
+import { EventEmitter } from 'node:events';
+import { runBootstrap, parseBootstrapMessage } from '../bootstrap/host.js';
+import { createLifecycleRouter, parseLifecycleEvent } from '../native-host/sidecar-protocol.js';
 
 import { NativeMessageDecoder, encodeNativeMessage } from '../native-host/native-framing.js';
 
@@ -95,4 +99,120 @@ test('returns a safe error for unsupported browser messages', async t => {
 
   assert.match(error.message, /unsupported browser message type/i);
   assert.doesNotMatch(error.message, /echo nope/);
+});
+
+const lifecycleBinding = { reviewId: 'review-1', candidateDigest: 'a'.repeat(64) };
+const humanDecision = { ...lifecycleBinding, policyDigest: 'b'.repeat(64), action: 'accept', nonce: 'n'.repeat(43) };
+async function lifecycleHost(t, overrides = {}) {
+  const input = new PassThrough(), output = new PassThrough(), messages = [], conversation = [], calls = [];
+  const decoder = new NativeMessageDecoder(m => messages.push(m)); output.on('data', b => decoder.push(b));
+  const coordinator = {
+    checkAvailability: async () => ({ state: 'available', ...lifecycleBinding }),
+    startReview: async () => ({ state: 'eligible', ...lifecycleBinding, decision: humanDecision, rejection: { ...humanDecision, action: 'reject', nonce: 'r'.repeat(43) } }),
+    acceptReview: async d => { calls.push(d); return { state: 'activated', ...lifecycleBinding }; },
+    rejectReview: async d => { calls.push(d); return { state: 'rejected', ...lifecycleBinding }; }, ...overrides,
+  };
+  const runtime = await runBootstrap({ input, output, signals: new EventEmitter(), coordinator,
+    receiptStore: { verifyChain: async () => ({ state: 'intact', receipts: [{ reviewId: 'review-1', candidateBundleDigest: 'a'.repeat(64), policySnapshotHash: 'b'.repeat(64), eventType: 'review-failed', directory: '/trusted/review-receipts/final' }] }) },
+    presentation: { openReviewReport: async p => { calls.push(p); return { status: 'opened' }; }, openChromeDeveloperProject: async () => { calls.push('desktop'); return { status: 'opened', project: { id: 'metadata-only' } }; } },
+    store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: 'c'.repeat(64), reviewId: 'old' }) },
+    proxyFactory: () => ({ pid: 123, send: m => conversation.push(m), close: async () => {} }),
+  });
+  t.after(() => runtime.close());
+  const sendMessage = m => input.write(encodeNativeMessage(m));
+  const settle = async predicate => { for (let n = 0; n < 100; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 5)); } assert.fail('Lifecycle did not settle'); };
+  return { messages, conversation, calls, sendMessage, settle };
+}
+test('all new lifecycle commands route exclusively through the trusted bootstrap', () => {
+  for (const m of [{ type: 'update.status' }, { type: 'review.start', ...lifecycleBinding }, ...['review.accept', 'review.reject'].map(type => { const { action, ...d } = humanDecision; return { type, ...d }; }), ...['review.openReport', 'review.openDesktop'].map(type => ({ type, ...lifecycleBinding }))]) assert.equal(parseBootstrapMessage(m).channel, 'lifecycle');
+});
+
+test('legacy channel selection rejects accessor, proxy, hidden and prototype authority', () => {
+  let reads = 0;
+  const accessor = { get type() { reads++; return 'review.start'; } };
+  const hidden = { type: 'review.start' }; Object.defineProperty(hidden, 'nonce', { value: 'hidden' });
+  for (const value of [accessor, hidden, new Proxy({ type: 'review.start' }, {}), Object.assign(Object.create({ nonce: 'hidden' }), { type: 'review.start' })]) assert.throws(() => parseBootstrapMessage(value));
+  assert.equal(reads, 0);
+});
+
+test('partial visible-lifecycle wiring fails startup before runtime recovery or launch', async () => {
+  let effects = 0;
+  await assert.rejects(runBootstrap({ store: { recover() { effects++; } }, coordinator: {}, presentation: {} }), /Trusted lifecycle dependencies/);
+  assert.equal(effects, 0);
+});
+
+test('malformed legacy action and flooding cannot leak legacy state events into modern lifecycle', async t => {
+  const h = await lifecycleHost(t);
+  h.sendMessage({ type: 'review.start' });
+  for (let i = 0; i < 12; i++) h.sendMessage({ type: 'update.status' });
+  await h.settle(() => h.messages.some(m => m.type === 'update.available'));
+  assert.equal(h.messages.length, 1); h.messages.forEach(parseLifecycleEvent);
+});
+
+test('native protocol errors do not expose parser diagnostic text to Chrome', async t => {
+  const child = createHost(); t.after(() => child.kill('SIGTERM')); const next = observeMessages(child);
+  send(child, { type: 'session.open', threadId: null }); await next(m => m.type === 'session.ready');
+  send(child, { type: 'turn.start', text: '__malformed__' }); const message = await next(m => m.type === 'protocol.error');
+  assert.deepEqual(message, { type: 'protocol.error', message: 'Native runtime unavailable' });
+});
+test('availability never starts review, long review never blocks conversation, and consent is exact and one-shot', async t => {
+  let release, entered = false;
+  const gate = new Promise(r => { release = r; });
+  const h = await lifecycleHost(t, { startReview: async () => { entered = true; await gate; return { state: 'eligible', ...lifecycleBinding, decision: humanDecision, rejection: { ...humanDecision, action: 'reject', nonce: 'r'.repeat(43) } }; } });
+  h.sendMessage({ type: 'update.status' }); await h.settle(() => h.messages.length === 1); assert.equal(entered, false); assert.equal(h.messages[0].type, 'update.available');
+  h.sendMessage({ type: 'review.start', ...lifecycleBinding }); await h.settle(() => entered);
+  h.sendMessage({ type: 'turn.start', text: '/during review λ' }); h.sendMessage({ type: 'turn.interrupt' }); await h.settle(() => h.conversation.length === 2);
+  assert.deepEqual(h.conversation, [{ type: 'turn.start', text: '/during review λ' }, { type: 'turn.interrupt' }]);
+  release(); await h.settle(() => h.messages.some(m => m.type === 'review.eligible'));
+  const { action, ...decision } = humanDecision;
+  h.sendMessage({ type: 'review.accept', ...decision }); h.sendMessage({ type: 'review.accept', ...decision });
+  await h.settle(() => h.messages.some(m => m.type === 'activation.completed'));
+  assert.deepEqual(h.calls, [humanDecision]); assert.equal(h.messages.some(m => JSON.stringify(m).includes('action')), false);
+});
+test('review failure contains only trusted navigation binding and report opening resolves retained custody', async t => {
+  const h = await lifecycleHost(t, { startReview: async () => ({ state: 'review-failed', ...lifecycleBinding }) });
+  h.sendMessage({ type: 'update.status' }); await h.settle(() => h.messages.length === 1);
+  h.sendMessage({ type: 'review.start', ...lifecycleBinding }); await h.settle(() => h.messages.some(m => m.type === 'review.failed'));
+  assert.deepEqual(h.messages.at(-1), { type: 'review.failed', ...lifecycleBinding });
+  h.sendMessage({ type: 'review.openReport', ...lifecycleBinding }); await h.settle(() => h.calls.length === 1);
+  assert.equal(h.calls[0], '/trusted/review-receipts/final/report.md');
+  h.sendMessage({ type: 'review.openDesktop', ...lifecycleBinding }); await h.settle(() => h.calls.length === 2); assert.equal(h.calls[1], 'desktop');
+  h.sendMessage({ type: 'review.openReport', ...lifecycleBinding, reviewId: 'other' }); await new Promise(r => setTimeout(r, 25)); assert.equal(h.calls.length, 2);
+});
+
+test('native conversation child rejects every lifecycle input without exposing injected diagnostic text', async t => {
+  const child = createHost(); t.after(() => child.kill('SIGTERM')); const next = observeMessages(child);
+  for (const type of ['update.status', 'review.start', 'review.accept', 'review.reject', 'review.openReport', 'review.openDesktop', 'PRIVATE-DIAGNOSTIC']) {
+    send(child, { type }); const result = await next(m => m.type === 'error'); assert.doesNotMatch(JSON.stringify(result), /PRIVATE/);
+  }
+});
+
+test('trusted router snapshots decisions, refuses replay and rejects incomplete startup wiring', async () => {
+  assert.throws(() => createLifecycleRouter({ coordinator: {} }));
+  const messages = [], calls = [];
+  const router = createLifecycleRouter({ send: m => messages.push(m), receiptStore: { verifyChain: async () => ({ state: 'intact', receipts: [] }) }, presentation: { openReviewReport() { assert.fail(); }, openChromeDeveloperProject() { assert.fail(); } }, coordinator: {
+    checkAvailability: async () => ({ state: 'available', ...lifecycleBinding }),
+    startReview: async () => ({ state: 'eligible', ...lifecycleBinding, decision: humanDecision, rejection: { ...humanDecision, action: 'reject', nonce: 'r'.repeat(43) } }),
+    acceptReview: async d => { await Promise.resolve(); calls.push(d); return { state: 'rolled-back', ...lifecycleBinding }; },
+    rejectReview: async () => assert.fail(),
+  } });
+  await router.handle({ type: 'update.status' });
+  const { action, ...d } = humanDecision;
+  await router.handle({ type: 'review.accept', ...d }); assert.equal(calls.length, 0);
+  await router.handle({ type: 'review.start', ...lifecycleBinding });
+  await router.handle({ type: 'review.accept', ...d, nonce: 'x'.repeat(43) }); assert.equal(calls.length, 0);
+  const message = { type: 'review.accept', ...d }, pending = router.handle(message); message.nonce = 'x'.repeat(43);
+  await pending; await router.handle({ type: 'review.accept', ...d }); assert.deepEqual(calls, [humanDecision]);
+  assert.deepEqual(messages.at(-1), { type: 'activation.rolledBack', ...lifecycleBinding });
+  router.close(); await router.handle({ type: 'update.status' }); assert.equal(messages.length, 5);
+});
+
+test('custody failure after report open produces no presentation success or private diagnostic event', async () => {
+  let custody = 'intact', opened = 0; const messages = [];
+  const router = createLifecycleRouter({ send: m => messages.push(m), receiptStore: { verifyChain: async () => ({ state: custody, receipts: [{ reviewId: lifecycleBinding.reviewId, candidateBundleDigest: lifecycleBinding.candidateDigest, eventType: 'review-failed', directory: '/trusted/review-receipts/final' }] }) }, presentation: { openReviewReport: async () => { opened++; custody = 'custody-broken'; throw new Error('PRIVATE STACK'); }, openChromeDeveloperProject: async () => { opened++; } }, coordinator: {
+    checkAvailability: async () => ({ state: 'available', ...lifecycleBinding }), startReview: async () => ({ state: 'review-failed', ...lifecycleBinding }), acceptReview() { assert.fail(); }, rejectReview() { assert.fail(); },
+  } });
+  await router.handle({ type: 'update.status' }); await router.handle({ type: 'review.start', ...lifecycleBinding });
+  await router.handle({ type: 'review.openReport', ...lifecycleBinding }); await router.handle({ type: 'review.openDesktop', ...lifecycleBinding });
+  assert.equal(opened, 1); assert.deepEqual(messages.at(-1), { type: 'review.failed', ...lifecycleBinding }); assert.equal(JSON.stringify(messages).includes('PRIVATE'), false);
 });
