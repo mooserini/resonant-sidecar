@@ -183,3 +183,27 @@ test('a behavior-preserving host edit remains reviewable without executing its e
   const result = await runDeterministicReview(input);
   assert.equal(result.passed, true, JSON.stringify(result));
 });
+
+test('generated installer command injection fails before any candidate test execution', async t => {
+  const source = await readFile(path.join(root, 'scripts/install-macos.js'), 'utf8');
+  const input = await setup(t, { 'scripts/install-macos.js': source.replace("    '#!/bin/sh',", "    '#!/bin/sh',\n    '/usr/bin/id',") });
+  const calls = [];
+  input.trustedHarness.runner = async invocation => {
+    calls.push(invocation);
+    return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  };
+  const result = await runDeterministicReview(input);
+  assert.equal(result.passed, false);
+  assert.ok(result.checks.some(check => check.reasonCode === 'command-authority-added'));
+  assert.equal(calls.length, 0);
+});
+
+test('actual CommonJS package declaration cannot be reviewed as forced ESM', async t => {
+  const pkg = JSON.parse(await readFile(path.join(root, 'package.json')));
+  pkg.type = 'commonjs';
+  const input = await setup(t, { 'package.json': JSON.stringify(pkg) });
+  const result = await runDeterministicReview(input);
+  assert.equal(result.passed, false);
+  assert.ok(result.checks.some(check => check.reasonCode === 'package-runtime-unsupported'));
+  assert.equal(result.checks.some(check => check.command), false);
+});

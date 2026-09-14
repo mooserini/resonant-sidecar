@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { compareCapabilities } from '../review/capability-diff.js';
 
-const policy = { approvedCapabilities: { chromePermissions: ['storage'], hostPermissions: [], listeners: [], lifecycleScripts: [] } };
+const policy = {
+  approvedCapabilities: { chromePermissions: ['storage'], hostPermissions: [], listeners: [], lifecycleScripts: [] },
+  runtimeContract: { packageType: 'module', nodeEngine: '>=22', excludedResolutionFields: ['main', 'imports', 'exports'] },
+};
 function baseline() {
   return {
     files: [{ path: 'native-host/host.js', mode: 0o644, sha256: 'a'.repeat(64) }],
@@ -40,10 +44,10 @@ for (const [name, change, reason] of [
 test('baseline test script is inert metadata; changed script bodies still fail', () => {
   const active = baseline();
   active.capabilities.lifecycleScripts = ['test'];
-  active.sources['package.json'] = JSON.stringify({ scripts: { test: 'node --test' } });
+  active.sources['package.json'] = JSON.stringify({ type: 'module', engines: { node: '>=22' }, scripts: { test: 'node --test' } });
   const candidate = structuredClone(active);
   assert.equal(compareCapabilities({ active, candidate, policy }).passed, true);
-  candidate.sources['package.json'] = JSON.stringify({ scripts: { test: 'node attacker.js' } });
+  candidate.sources['package.json'] = JSON.stringify({ type: 'module', engines: { node: '>=22' }, scripts: { test: 'node attacker.js' } });
   assert.equal(compareCapabilities({ active, candidate, policy }).passed, false);
 });
 
@@ -89,3 +93,49 @@ test('changed spawn arguments fail even with the same number of spawn calls', ()
   candidate.sources['native-host/host.js'] = "const child = spawn('/bin/sh', args);";
   assert.equal(compareCapabilities({ active, candidate, policy }).passed, false);
 });
+
+const installerSource = await readFile(new URL('../scripts/install-macos.js', import.meta.url), 'utf8');
+for (const [name, change] of [
+  ['literal command inserted into launcher', source => source.replace("    '#!/bin/sh',", "    '#!/bin/sh',\n    '/usr/bin/id',")],
+  ['helper changes launcher quoting', source => source.replace('String(value)', "String(value) + '; /usr/bin/id'")],
+  ['default executable input changes', source => source.replace("'.local', 'bin', 'codex'", "'.local', 'bin', 'other'")],
+  ['host-path input changes', source => source.replace("'native-host', 'host.js'", "'native-host', 'other.js'")],
+  ['call-site overrides executable input', source => source.replace('buildInstallPlan({ extensionId: options.extensionId })', "buildInstallPlan({ extensionId: options.extensionId,\n      codexPath: '/usr/bin/id',\n    })")],
+]) {
+  test(`installer authority rejects ${name}`, () => {
+    const active = baseline();
+    active.sources['scripts/install-macos.js'] = installerSource;
+    const candidate = structuredClone(active);
+    candidate.sources['scripts/install-macos.js'] = change(installerSource);
+    const result = compareCapabilities({ active, candidate, policy });
+    assert.equal(result.passed, false);
+    assert.ok(result.checks.some(check => check.reasonCode === 'command-authority-added'));
+  });
+}
+
+test('unrelated installer display edit remains reviewable', () => {
+  const active = baseline();
+  active.sources['scripts/install-macos.js'] = installerSource;
+  const candidate = structuredClone(active);
+  candidate.sources['scripts/install-macos.js'] = installerSource.replace('Dry run only; no files changed.', 'Dry run; installation has not started.');
+  assert.equal(compareCapabilities({ active, candidate, policy }).passed, true);
+});
+
+for (const [name, change] of [
+  ['CommonJS package mode', pkg => { pkg.type = 'commonjs'; }],
+  ['missing package mode', pkg => { delete pkg.type; }],
+  ['unsupported Node engine', pkg => { pkg.engines.node = '>=99'; }],
+  ['package import remapping', pkg => { pkg.imports = { '#host': './other.js' }; }],
+]) {
+  test(`runtime contract rejects ${name}`, () => {
+    const active = baseline();
+    const pkg = { type: 'module', engines: { node: '>=22' } };
+    active.sources['package.json'] = JSON.stringify(pkg);
+    const candidate = structuredClone(active);
+    change(pkg);
+    candidate.sources['package.json'] = JSON.stringify(pkg);
+    const result = compareCapabilities({ active, candidate, policy });
+    assert.equal(result.passed, false);
+    assert.ok(result.checks.some(check => check.reasonCode === 'package-runtime-unsupported'));
+  });
+}

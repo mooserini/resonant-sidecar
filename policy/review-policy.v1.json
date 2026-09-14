@@ -1,5 +1,10 @@
 {
   "schemaVersion": 1,
+  "runtimeContract": {
+    "packageType": "module",
+    "nodeEngine": ">=22",
+    "excludedResolutionFields": ["main", "imports", "exports"]
+  },
   "approvedCapabilities": {
     "chromePermissions": [
       "nativeMessaging",

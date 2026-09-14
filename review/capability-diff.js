@@ -16,6 +16,18 @@ function sensitiveLines(source, detector) {
   return (source ?? '').split('\n').map(line => line.trim()).filter(line => detector.test(line)).sort();
 }
 
+function installerAuthority(source) {
+  if (typeof source !== 'string') return null;
+  // The installer's generated shell must not be keyword-sampled: a bare
+  // string in its launcher array is executable authority too. Preserve the
+  // entire construction, defaults, helpers, input parsing, call sites, and
+  // writer. Only standalone literal stdout display text is non-authority.
+  // This narrow exception cannot hide expressions, escapes, or shell lines.
+  return source.replace(/process\.stdout\.write\(\[([\s\S]*?)\]\.join\('\\n'\)\);/g,
+    (statement, display) => statement.replace(display,
+      display.replace(/^(\s*)'[^'\\\r\n]*'(,?)\s*$/gm, "$1'<display-text>'$2")));
+}
+
 // These conservative detectors are bounded review evidence, not proof of
 // arbitrary JavaScript equivalence. Codex review and human acceptance follow.
 export function compareCapabilities({ active, candidate, policy }) {
@@ -55,12 +67,21 @@ export function compareCapabilities({ active, candidate, policy }) {
   }
   const oldPackage = active.sources?.['package.json'];
   const newPackage = candidate.sources?.['package.json'];
+  const oldInstaller = active.sources?.['scripts/install-macos.js'];
+  const newInstaller = candidate.sources?.['scripts/install-macos.js'];
+  if (installerAuthority(oldInstaller) !== installerAuthority(newInstaller)) reasons.add('command-authority-added');
   if (newPackage !== undefined) {
     try {
       const oldScripts = oldPackage === undefined ? {} : JSON.parse(oldPackage).scripts ?? {};
       const newScripts = JSON.parse(newPackage).scripts ?? {};
       if (canonicalJson(oldScripts) !== canonicalJson(newScripts)) reasons.add('lifecycle-script-added');
       const pkg = JSON.parse(newPackage);
+      const contract = policy.runtimeContract;
+      if (!contract || pkg.type !== contract.packageType
+          || pkg.engines?.node !== contract.nodeEngine
+          || contract.excludedResolutionFields.some(field => Object.hasOwn(pkg, field))) {
+        reasons.add('package-runtime-unsupported');
+      }
       if (pkg.bin || pkg.gypfile || pkg.workspaces) reasons.add('executable-added');
       if (pkg.devDependencies && Object.keys(pkg.devDependencies).length) reasons.add('dependency-drift');
     } catch { reasons.add('schema-invalid'); }
