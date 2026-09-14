@@ -145,11 +145,27 @@ async function renderedPanel() {
   for (const match of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
     const node = element(match[1]); node.hidden = /\bhidden\b/.test(match[0]); node.disabled = /\bdisabled\b/.test(match[0]); elements.set(node.id, node);
   }
-  const port = new FakePort(), storage = createStorage();
-  await vm.runInNewContext(`(async () => { ${script.replace(/^import .*;\n/, '')} })()`, { SidecarSession, document, window: { addEventListener() {} }, chrome: { runtime: { connectNative: () => port }, storage: { session: storage } } });
+  const port = new FakePort(), storage = createStorage(), windowEvents = {};
+  await vm.runInNewContext(`(async () => { ${script.replace(/^import .*;\n/, '')} })()`, { SidecarSession, document, window: { addEventListener(name, listener) { windowEvents[name] = listener; } }, chrome: { runtime: { connectNative: () => port }, storage: { session: storage } } });
   const node = id => elements.get(id);
-  return { node, document, port, elements };
+  return { node, document, port, elements, windowEvents };
 }
+
+for (const origin of ['remote', 'local']) test(`${origin} disconnect restores focus from a review control without retaining review authority`, async () => {
+  const { node, document, port, windowEvents } = await renderedPanel();
+  port.onMessage.emit({ type: 'update.available', ...reviewBinding }); node('start-review').click();
+  port.onMessage.emit({ type: 'review.started', ...reviewBinding }); port.onMessage.emit(eligible);
+  port.onMessage.emit({ type: 'turn.started', turnId: 'active' }); node('accept-review').focus();
+  if (origin === 'remote') port.onDisconnect.emit(); else windowEvents.pagehide();
+  assert.equal(document.activeElement, node('turn-text'));
+  assert.equal(node('review-card').hidden, true); assert.equal(node('connection-status').textContent, 'Disconnected');
+  assert.equal(node('stop-button').disabled, true);
+  const count = port.posted.length;
+  // Even a retained old DOM handler must not be able to submit an old grant.
+  node('accept-review').listeners.click();
+  port.onMessage.emit(eligible);
+  assert.equal(port.posted.length, count); assert.equal(node('review-card').hidden, true);
+});
 
 test('rendered failure has only fixed navigation, keeps Stop live, and never renders diagnostic payloads', async () => {
   const { node, document, port, elements } = await renderedPanel();

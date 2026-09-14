@@ -79,8 +79,8 @@ function handleEvent(event) {
     return;
   }
   if (event.type === 'connection.closed') {
-    reviewCard.hidden = true;
     setBusy(false);
+    renderReview();
     setStatus('Disconnected', 'closed');
     showError('The local sidecar disconnected. Close and reopen the panel to reconnect.');
     return;

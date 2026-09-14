@@ -162,7 +162,11 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
         if (typeof coordinator?.handle !== 'function') throw new Error('Coordinator unavailable');
         const response = await coordinator.handle(route.message);
         if (response !== undefined) send({ type: 'review.status', ...response });
-      }).catch(error => { if (!lifecycle) lifecycleFailure(error); }).finally(() => { --lifecyclePending; });
+      }).catch(error => { if (!lifecycle) lifecycleFailure(error); })
+        .finally(() => { --lifecyclePending; })
+        // A failed legacy fallback has already triggered send's fatal close.
+        // Drain shutdown without allowing this detached task to reject unhandled.
+        .catch(() => close().catch(() => {}));
       return;
     }
     const bytes = Buffer.byteLength(JSON.stringify(route.message));

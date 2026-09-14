@@ -13,6 +13,43 @@ import { NativeMessageDecoder, encodeNativeMessage } from '../native-host/native
 const hostPath = fileURLToPath(new URL('../native-host/host.js', import.meta.url));
 const fixturePath = fileURLToPath(new URL('./fixtures/fake-app-server.js', import.meta.url));
 
+for (const mode of ['write-throw', 'overflow']) test(`legacy failure fallback ${mode} completes delayed reap and recovery under strict unhandled-rejection semantics`, async t => {
+  const script = `
+    import { runBootstrap } from ${JSON.stringify(new URL('../bootstrap/host.js', import.meta.url).href)};
+    import { QUEUE_LIMIT } from ${JSON.stringify(new URL('../bootstrap/native-proxy.js', import.meta.url).href)};
+    import { encodeNativeMessage } from ${JSON.stringify(new URL('../native-host/native-framing.js', import.meta.url).href)};
+    import { PassThrough } from 'node:stream';
+    import { EventEmitter } from 'node:events';
+    const input = new PassThrough(), output = new PassThrough();
+    const log = value => process.stdout.write(JSON.stringify(value) + '\\n');
+    let ready, closes = 0, recoveries = 0;
+    const started = new Promise(resolve => { ready = resolve; });
+    const runtime = await runBootstrap({ input, output, signals: new EventEmitter(),
+      store: { bindRuntimeGuard() {}, async recover() { recoveries++; log('recovered'); }, async resolveActiveHost() { return { digest: 'a'.repeat(64), reviewId: 'old' }; } },
+      coordinator: { async handle() { throw new Error('PRIVATE coordinator detail'); } },
+      proxyFactory: () => ({ pid: 123, send() { ready(); }, async close() { closes++; log('reap-start'); await new Promise(resolve => setTimeout(resolve, 40)); log('reap-finished'); } }),
+    });
+    input.write(encodeNativeMessage({ type: 'turn.start', text: 'healthy A' })); await started;
+    if (${JSON.stringify(mode)} === 'overflow') Object.defineProperty(output, 'writableLength', { value: QUEUE_LIMIT });
+    else output.write = () => { throw new Error('PRIVATE output detail'); };
+    input.write(encodeNativeMessage({ type: 'review.start' }));
+    await runtime.closed; await runtime.close();
+    log({ closes, recoveries, inputListeners: input.listenerCount('data') });
+  `;
+  const child = spawn(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '--eval', script], { env: { ...process.env, NODE_OPTIONS: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill('SIGKILL'));
+  let stdout = '', stderr = '';
+  child.stdout.on('data', bytes => { stdout += bytes; }); child.stderr.on('data', bytes => { stderr += bytes; });
+  const result = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Legacy shutdown timed out')); }, 4000);
+    child.once('error', error => { clearTimeout(timer); reject(error); });
+    child.once('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
+  });
+  assert.equal(result.code, 0, `child failed before shutdown completed: ${stdout}\n${stderr}`);
+  assert.equal(result.signal, null); assert.equal(stderr, '');
+  assert.deepEqual(stdout.trim().split('\n').map(JSON.parse), ['recovered', 'reap-start', 'reap-finished', 'recovered', { closes: 1, recoveries: 2, inputListeners: 0 }]);
+});
+
 function createHost() {
   return spawn(process.execPath, [hostPath], {
     cwd: process.cwd(),
