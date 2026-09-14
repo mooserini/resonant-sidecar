@@ -1,0 +1,9 @@
+Executable=/usr/bin/true
+Identifier=com.google.Chrome.dev
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20500 size=123 flags=0x10000(runtime) hashes=4+7 location=embedded
+CDHash=1111111111111111111111111111111111111111
+Authority=Developer ID Application: Google LLC (EQHXZ8M8AV)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+TeamIdentifier=EQHXZ8M8AV
