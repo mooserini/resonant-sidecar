@@ -19,7 +19,13 @@ export function runner(overrides = {}) {
   const run = async invocation => {
     calls.push(invocation);
     const { command, args } = invocation;
-    if (overrides[command]) return overrides[command](invocation, calls);
+    if (overrides[command]) {
+      const result = await overrides[command](invocation, calls);
+      // Human-readable fixtures use one field per line. Model the requested
+      // -F0 wire format at the external boundary, preserving explicit NUL data.
+      if (command === '/usr/sbin/lsof' && !result.stdout.includes('\0')) return { ...result, stdout: result.stdout.replaceAll('\n', '\0\n') };
+      return result;
+    }
     let stdout = ''; let stderr = '';
     if (command === '/bin/ps') stdout = ps;
     else if (command === '/usr/sbin/lsof') stdout = lsof.replaceAll('\n', '\0\n');

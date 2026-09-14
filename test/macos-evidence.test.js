@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, rename, realpath, mkdir, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { collectMacOSEvidence } from '../review/macos-evidence.js';
@@ -130,4 +130,121 @@ test('missing signing constraint and accessor arrays are rejected before executi
     assert.equal(fixture.calls.length, 0);
   }
   assert.equal(invoked, false);
+});
+
+for (const [name, fields] of [
+  ['contradictory TCP states', 'tIPv4\nPTCP\nn127.0.0.1:5000\nTST=LISTEN\nTST=ESTABLISHED'],
+  ['contradictory type', 'tIPv4\ntREG\nPTCP\nn127.0.0.1:5000\nTST=ESTABLISHED'],
+  ['contradictory protocol', 'tIPv4\nPTCP\nPUDP\nn127.0.0.1:5000\nTST=LISTEN'],
+  ['contradictory endpoint', 'tIPv4\nPTCP\nn*:5000\nn127.0.0.1:5000\nTST=ESTABLISHED'],
+  ['unknown TCP state', 'tIPv4\nPTCP\nn127.0.0.1:5000\nTST=UNRECOGNIZED'],
+  ['truncated TCP state', 'tIPv4\nPTCP\nn127.0.0.1:5000\nTST=LIST'],
+  ['missing descriptor type', 'n127.0.0.1:5000'],
+  ['missing descriptor name', 'tIPv4\nPTCP\nTST=ESTABLISHED'],
+  ['TCP state on a non-TCP descriptor', 'tREG\nn/private/file\nTST=LISTEN'],
+  ['unknown descriptor type', 'tUNKNOWN\nn/private/file'],
+]) {
+  test(`rejects uncertain lsof evidence: ${name}`, async () => {
+    const fixture = runner({ '/usr/sbin/lsof': () => ({ exitCode: 0, stderr: '', stdout: `${lsof}\np103\nf17\n${fields}\n`.replaceAll('\n', '\0\n') }) });
+    await assert.rejects(collectMacOSEvidence({ ...policy(), runner: fixture.run }), /evidence/);
+  });
+}
+
+test('rejects malformed numeric descriptor identifiers', async () => {
+  const fixture = runner({ '/usr/sbin/lsof': () => ({ exitCode: 0, stderr: '', stdout: `${lsof}\np103\nf17invalid\ntREG\nn/private/file\n` }) });
+  await assert.rejects(collectMacOSEvidence({ ...policy(), runner: fixture.run }), /evidence/);
+});
+
+for (const kind of ['start-time', 'parent', 'missing-parent']) {
+  test(`rejects initial ${kind} mismatch before any process-specific diagnostic`, async () => {
+    const input = policy();
+    if (kind === 'start-time') input.processes[3].startTime = 'Mon Sep 14 11:00:00 2026';
+    const fixture = runner({ '/bin/ps': ({ args }) => kind === 'missing-parent' && args[2] === '102'
+      ? { exitCode: 1, stdout: '', stderr: '' }
+      : { exitCode: 0, stderr: '', stdout: kind === 'parent' ? ps.replace('103 102 101', '103 1 101') : ps } });
+    await assert.rejects(collectMacOSEvidence({ ...input, runner: fixture.run }), /evidence/);
+    assert.equal(fixture.calls.some(c => ['/usr/sbin/lsof', '/usr/bin/codesign', '/usr/bin/sample'].includes(c.command)), false);
+  });
+}
+
+for (const moment of ['display', 'verify', 'final-ps']) {
+  test(`rejects executable inode replacement during ${moment}`, async t => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'macos-executable-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const executable = path.join(directory, 'executable');
+    const replacement = path.join(directory, 'replacement');
+    await writeFile(executable, 'identical bytes'); await writeFile(replacement, 'identical bytes');
+    const input = policy(); input.processes[0].executablePath = executable; input.expectedChrome.executablePath = executable;
+    let replaced = false; let psReads = 0;
+    const ordinary = runner().run;
+    const fixture = runner({
+      '/usr/bin/codesign': async invocation => {
+        if (!replaced && invocation.args[0] === `--${moment}`) { await rename(replacement, executable); replaced = true; }
+        return ordinary(invocation);
+      },
+      '/bin/ps': async () => {
+        if (moment === 'final-ps' && ++psReads > 4 && !replaced) { await rename(replacement, executable); replaced = true; }
+        return { exitCode: 0, stderr: '', stdout: ps.replace('/usr/bin/true', executable) };
+      },
+    });
+    await assert.rejects(collectMacOSEvidence({ ...input, runner: fixture.run }), /evidence/);
+    assert.equal(replaced, true);
+  });
+}
+
+test('codesign uses the same canonical file path as the retained executable identity', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'macos-resolution-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(path.join(directory, 'real'));
+  await symlink(path.join(directory, 'real'), path.join(directory, 'alias'));
+  const executable = path.join(directory, 'alias', 'executable'); await writeFile(executable, 'synthetic executable');
+  const canonical = await realpath(executable);
+  const input = policy(); input.processes[0].executablePath = executable; input.expectedChrome.executablePath = executable;
+  const fixture = runner({ '/bin/ps': () => ({ exitCode: 0, stderr: '', stdout: ps.replace('/usr/bin/true', executable) }) });
+  const evidence = await collectMacOSEvidence({ ...input, runner: fixture.run });
+  assert.equal(evidence.passed, true);
+  assert.deepEqual(fixture.calls.filter(c => c.command === '/usr/bin/codesign').slice(0, 2).map(c => c.args.at(-1)), [canonical, canonical]);
+  assert.match(evidence.processes[0].executable.sha256, /^[a-f0-9]{64}$/);
+});
+
+test('rejects changed ancestor resolution between the signing probes', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'macos-ancestor-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const name of ['first', 'second']) { await mkdir(path.join(directory, name)); await writeFile(path.join(directory, name, 'executable'), 'same bytes'); }
+  const alias = path.join(directory, 'alias'); await symlink(path.join(directory, 'first'), alias);
+  const executable = path.join(alias, 'executable');
+  const input = policy(); input.processes[0].executablePath = executable; input.expectedChrome.executablePath = executable;
+  const ordinary = runner().run; let swapped = false;
+  const fixture = runner({
+    '/bin/ps': () => ({ exitCode: 0, stderr: '', stdout: ps.replace('/usr/bin/true', executable) }),
+    '/usr/bin/codesign': async invocation => {
+      if (!swapped) { await unlink(alias); await symlink(path.join(directory, 'second'), alias); swapped = true; }
+      return ordinary(invocation);
+    },
+  });
+  await assert.rejects(collectMacOSEvidence({ ...input, runner: fixture.run }), /evidence/);
+});
+
+test('NUL-delimited file names cannot inject process boundaries to conceal a listener', async () => {
+  const stdout = 'p103\0\nfcwd\0tDIR\0n/tmp\0\nf0\0tREG\0n/private/name\np999\0\nf17\0tIPv4\0PTCP\0n127.0.0.1:5000\0TST=LISTEN\0\n';
+  const ordinary = runner().run;
+  const fixture = runner({ '/usr/sbin/lsof': invocation => invocation.args[3] === '103'
+    ? { exitCode: 0, stderr: '', stdout }
+    : ordinary(invocation) });
+  const evidence = await collectMacOSEvidence({ ...policy(), runner: fixture.run });
+  assert.equal(evidence.passed, false);
+  assert.equal(evidence.processes[2].listeners[0].port, 5000);
+});
+
+test('rejects executable mutation after its own final ps check but before collection finishes', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'macos-final-binding-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = path.join(directory, 'executable'); await writeFile(executable, 'initial executable');
+  const input = policy(); input.processes[0].executablePath = executable; input.expectedChrome.executablePath = executable;
+  let reads = 0;
+  const fixture = runner({ '/bin/ps': async () => {
+    if (++reads === 8) await writeFile(executable, 'changed executable');
+    return { exitCode: 0, stderr: '', stdout: ps.replace('/usr/bin/true', executable) };
+  } });
+  await assert.rejects(collectMacOSEvidence({ ...input, runner: fixture.run }), /evidence/);
 });

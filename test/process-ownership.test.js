@@ -17,7 +17,7 @@ test('hard-fails every sidecar TCP listener even when bound to loopback', async 
   const expected = policy();
   for (const name of ['bootstrap', 'active-host', 'sidecar-codex']) {
     const evidence = await collectMacOSEvidence({ ...expected, runner: runner().run });
-    evidence.processes.find(p => p.name === name).listeners.push({ protocol: 'TCP', address: '127.0.0.1', port: 9222, transport: 'tcp' });
+    evidence.processes.find(p => p.name === name).listeners.push({ fd: 17, protocol: 'TCP', address: '127.0.0.1', port: 9222, transport: 'tcp' });
     const verdict = verifyOwnershipTopology(evidence, expected);
     assert.equal(verdict.passed, false);
     assert.ok(verdict.checks.some(c => c.reasonCode === 'sidecar-listener'));
@@ -45,7 +45,7 @@ test('after Chrome exit verifies all previously relevant PIDs absent and rejects
   const evidence = await collectMacOSEvidence({ ...expected, runner: runner({ '/bin/ps': () => ({ exitCode: 1, stdout: '', stderr: '' }) }).run });
   assert.equal(evidence.passed, true);
   assert.equal(evidence.processes.every(p => p.present === false), true);
-  evidence.processes[2].present = true;
+  evidence.processes[2] = (await collectMacOSEvidence({ ...policy('after'), runner: runner().run })).processes[2];
   assert.equal(verifyOwnershipTopology(evidence, expected).passed, false);
 });
 
@@ -77,6 +77,48 @@ test('rejects malformed OS identity and process descriptor fields', async () => 
   for (const mutate of [e => { e.architecture = 'unknown'; }, e => { e.bootSessionUUID = 'not-a-uuid'; }, e => { e.macOSVersion = 'nonsense'; }, e => { e.processes[1].listeners = [{ summary: 'arbitrary prose' }]; }]) {
     const evidence = await collectMacOSEvidence({ ...expected, runner: runner().run });
     mutate(evidence);
+    assert.throws(() => verifyOwnershipTopology(evidence, expected), /evidence/);
+  }
+});
+
+for (const field of ['elapsedTime', 'descriptors', 'checks', 'sampleDigest']) {
+  test(`rejects missing mandatory ${field} process evidence`, async () => {
+    const expected = policy();
+    const evidence = await collectMacOSEvidence({ ...expected, runner: runner().run });
+    delete evidence.processes[1][field];
+    assert.throws(() => verifyOwnershipTopology(evidence, expected), /evidence/);
+  });
+}
+
+for (const kind of ['missing', 'duplicate', 'all-missing']) {
+  test(`rejects ${kind} stability evidence`, async () => {
+    const expected = policy();
+    const evidence = await collectMacOSEvidence({ ...expected, runner: runner().run });
+    if (kind === 'missing') evidence.checks = evidence.checks.filter(c => c.name !== 'bootstrap-stable');
+    else if (kind === 'duplicate') evidence.checks.push({ ...evidence.checks.find(c => c.name === 'bootstrap-stable') });
+    else delete evidence.checks;
+    assert.throws(() => verifyOwnershipTopology(evidence, expected), /evidence/);
+  });
+}
+
+test('failed stability evidence cannot pass even if top-level passed is forged', async () => {
+  const expected = policy(); const evidence = await collectMacOSEvidence({ ...expected, runner: runner().run });
+  Object.assign(evidence.checks.find(c => c.name === 'bootstrap-stable'), { passed: false, reasonCode: 'process-changed' });
+  evidence.passed = true;
+  assert.equal(verifyOwnershipTopology(evidence, expected).passed, false);
+});
+
+test('rejects malformed sample counters, digest mismatches, descriptors and elapsed time', async () => {
+  for (const mutate of [
+    e => { e.processes[1].checks = []; },
+    e => { e.processes[1].checks[0].actual = -1; },
+    e => { e.processes[1].checks[0].name = 'unrecognized'; },
+    e => { e.processes[1].checks[0].actual += 1; },
+    e => { e.processes[1].sampleDigest = 'a'.repeat(64); },
+    e => { e.processes[1].descriptors = [{ fd: -1, type: 'PIPE' }]; },
+    e => { e.processes[1].elapsedTime = 'arbitrary'; },
+  ]) {
+    const expected = policy(); const evidence = await collectMacOSEvidence({ ...expected, runner: runner().run }); mutate(evidence);
     assert.throws(() => verifyOwnershipTopology(evidence, expected), /evidence/);
   }
 });
