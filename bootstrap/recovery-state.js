@@ -12,6 +12,15 @@ export function assertDecision(d) {
   return d;
 }
 
+export function snapshotDecision(value) {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('Invalid decision');
+  const fields = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(fields).some(key => typeof key !== 'string' || !Object.hasOwn(fields[key], 'value') || !fields[key].enumerable)) throw new Error('Invalid decision fields');
+  const snapshot = Object.fromEntries(Object.entries(fields).map(([key, descriptor]) => [key, descriptor.value]));
+  assertDecision(snapshot);
+  return Object.freeze(snapshot);
+}
+
 export function recoverInterruptedActivation(state) {
   if (state === null) return { action: 'none' };
   try {

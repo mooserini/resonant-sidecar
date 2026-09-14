@@ -3,7 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { assertBundleManifest, buildBundleManifest } from '../review/bundle-manifest.js';
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
-import { assertPin, assertDecision, recoverInterruptedActivation, samePin } from './recovery-state.js';
+import { assertPin, snapshotDecision, recoverInterruptedActivation, samePin } from './recovery-state.js';
+import { withRuntimeLock } from './runtime-lock.js';
 
 const MAX_FILE = 8 * 1024 * 1024;
 const MAX_BUNDLE = 32 * 1024 * 1024;
@@ -52,7 +53,7 @@ function writeNew(p, bytes, mode = 0o600) {
 }
 
 export class VersionStore {
-  #project; #root; #device; #consume; #pending = null;
+  #project; #root; #device; #consume; #pending = null; #runtimeGuard = null;
   constructor({ projectRoot, consumeDecision } = {}) {
     this.#project = concrete(projectRoot);
     this.#root = path.join(projectRoot, 'runtime');
@@ -60,31 +61,19 @@ export class VersionStore {
   }
   #prepare() {
     concrete(this.#project);
-    if (!exists(this.#root)) { fs.mkdirSync(this.#root, { mode: 0o700 }); syncDir(this.#project); }
+    if (!exists(this.#root)) { try { fs.mkdirSync(this.#root, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') throw e; } syncDir(this.#project); }
     this.#device = privatePath(this.#root, true).dev;
     for (const name of ['active', 'previous', 'versions', 'quarantine', 'history', 'decisions', 'installations']) {
       const dir = path.join(this.#root, name);
-      if (!exists(dir)) { fs.mkdirSync(dir, { mode: 0o700 }); syncDir(this.#root); }
+      if (!exists(dir)) { try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') throw e; } syncDir(this.#root); }
       privatePath(dir, true, this.#device);
     }
   }
   async #locked(fn) {
     this.#prepare();
-    const lock = path.join(this.#root, '.store-lock.json');
-    if (exists(lock)) {
-      const owner = readCanonical(lock, this.#device);
-      if (Object.keys(owner).join(',') !== 'pid' || !Number.isSafeInteger(owner.pid) || owner.pid < 1) fail('Invalid custody lock');
-      try { process.kill(owner.pid, 0); fail('Runtime store busy'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
-      fs.unlinkSync(lock); syncDir(this.#root);
-    }
-    writeNew(lock, canonicalJson({ pid: process.pid }) + '\n'); syncDir(this.#root);
-    const inode = fs.lstatSync(lock).ino;
-    try { return await fn(); }
-    finally {
-      privatePath(lock, false, this.#device);
-      if (fs.lstatSync(lock).ino !== inode) fail('Runtime lock custody changed');
-      fs.unlinkSync(lock); syncDir(this.#root);
-    }
+    return withRuntimeLock({ file: path.join(this.#root, '.store-lock.json'), device: this.#device }, async () => {
+      this.#prepare(); syncDir(this.#root); return fn();
+    });
   }
   #atomic(relative, value) {
     const destination = path.join(this.#root, relative); const parent = path.dirname(destination);
@@ -196,8 +185,9 @@ export class VersionStore {
     });
   }
   async activate(decision) {
+    decision = snapshotDecision(decision);
     return this.#locked(async () => {
-      assertDecision(decision); const old = this.#state();
+      const old = this.#state();
       if (recoverInterruptedActivation(old).action !== 'none') fail('Activation recovery required');
       const candidate = { schemaVersion: 1, digest: decision.candidateDigest, reviewId: decision.reviewId };
       this.#assertInstalled(candidate);
@@ -208,8 +198,8 @@ export class VersionStore {
       if (priorPrevious) await this.#version(priorPrevious);
       if (previous?.digest === candidate.digest) fail('Candidate already active');
       if (typeof this.#consume !== 'function') fail('Trusted decision consumer required');
-      const frozen = Object.freeze({ ...decision }); const proof = await this.#consume(frozen);
-      if (!proof || proof.consumed !== true || canonicalJson(proof) !== canonicalJson({ ...frozen, consumed: true })) fail('Consumed decision mismatch');
+      const proof = await this.#consume(decision);
+      if (!proof || proof.consumed !== true || canonicalJson(proof) !== canonicalJson({ ...decision, consumed: true })) fail('Consumed decision mismatch');
       // Recheck custody after the asynchronous coordinator boundary.
       await this.#version(candidate);
       if (previous) await this.#version(previous);
@@ -236,18 +226,21 @@ export class VersionStore {
     });
   }
   async completeActivation(decision) {
+    decision = snapshotDecision(decision);
     return this.#locked(async () => {
-      assertDecision(decision); const state = this.#state();
+      const state = this.#state();
       if (state?.phase !== 'pending-verification' || this.#pending !== state.decisionHash || sha256Bytes(decision.nonce) !== state.decisionHash || decision.reviewId !== state.candidate.reviewId || decision.candidateDigest !== state.candidate.digest || !samePin(this.#pin('active'), state.candidate)) fail('Activation completion mismatch');
       const consumed = readCanonical(path.join(this.#root, 'decisions', `${state.decisionHash}.json`), this.#device);
       if (canonicalJson(consumed) !== canonicalJson({ candidate: state.candidate, policyDigest: decision.policyDigest })) fail('Activation completion decision mismatch');
       await this.#version(state.candidate);
+      if (this.#runtimeGuard && !this.#runtimeGuard({ ...state.candidate, decisionHash: state.decisionHash })) fail('Pending runtime refresh required before completion');
       state.phase = 'complete'; this.#save(state); this.#pending = null;
       return { phase: 'complete' };
     });
   }
   async #rollback(state, failureRef) {
-    await this.#version(state.candidate);
+    // Failed candidate bytes are evidence, never a prerequisite to restoring
+    // the independently verified previous runtime. Do not edit or execute B.
     if (state.previous) await this.#version(state.previous);
     state.phase = 'rolling-back'; state.failureRef ??= failureRef; this.#save(state);
     this.#atomic('previous/pin.json', state.previous);
@@ -267,6 +260,20 @@ export class VersionStore {
       const state = this.#state();
       if (recoverInterruptedActivation(state).action === 'none') return { action: 'none' };
       return this.#rollback(state, 'interrupted-activation');
+    });
+  }
+  bindRuntimeGuard(guard) {
+    if (this.#runtimeGuard || typeof guard !== 'function') fail('Runtime guard already bound or invalid');
+    this.#runtimeGuard = guard;
+  }
+  async resolvePendingHost(decision) {
+    decision = snapshotDecision(decision);
+    return this.#locked(async () => {
+      const state = this.#state();
+      if (state?.phase !== 'pending-verification' || state.decisionHash !== this.#pending || state.decisionHash !== sha256Bytes(decision.nonce) || state.candidate.digest !== decision.candidateDigest || state.candidate.reviewId !== decision.reviewId || !samePin(this.#pin('active'), state.candidate)) fail('Pending refresh decision mismatch');
+      const consumed = readCanonical(path.join(this.#root, 'decisions', `${state.decisionHash}.json`), this.#device);
+      if (consumed.policyDigest !== decision.policyDigest) fail('Pending refresh policy mismatch');
+      return this.#version(state.candidate);
     });
   }
 }

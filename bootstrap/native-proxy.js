@@ -42,6 +42,7 @@ function conversationEvent(message) {
     'policy.violation': ['method', 'message'], 'app-server.event': ['method', 'params'],
   };
   if (!message || !Object.hasOwn(shapes, message.type) || Object.keys(message).some(k => k !== 'type' && !shapes[message.type].includes(k))) throw new Error('Invalid child event');
+  if (message.type === 'session.ready' && (typeof message.threadId !== 'string' || message.threadId.length < 1 || message.threadId.length > 256)) throw new Error('Invalid child session readiness');
   for (const key of shapes[message.type]) {
     if (key === 'params') {
       if (!message.params || typeof message.params !== 'object' || Array.isArray(message.params)) throw new Error('Invalid child event');
@@ -73,7 +74,7 @@ export function startNativeProxy({ nodePath, codexPath, active, workspace, userH
     })();
     return closing;
   };
-  const fail = () => { onFailure(); void close(); };
+  const fail = () => { if (!closing) { onFailure(); void close(); } };
   child.on('error', fail); child.stdin.on('error', fail);
   child.stdout.on('error', fail); child.stderr.on('error', fail);
   child.once('exit', () => { if (!closing) fail(); });

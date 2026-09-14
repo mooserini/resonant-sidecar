@@ -93,14 +93,16 @@ test('oversized browser frames fail closed without starting a child or forwardin
   assert.deepEqual(messages, [{ type: 'error', message: 'Native runtime unavailable' }]);
 });
 
-for (const emission of ['lifecycle', 'oversized', 'stderr-flood']) {
+for (const emission of ['lifecycle', 'oversized', 'stderr-flood', 'missing-session-id']) {
   test(`child ${emission} is stopped without crossing the trusted output boundary`, async t => {
     const f = await runtimeFixture(t);
     const host = emission === 'lifecycle'
       ? `const b=Buffer.from('{"type":"review.status","state":"eligible"}');const h=Buffer.alloc(4);h.writeUInt32LE(b.length);process.stdout.write(Buffer.concat([h,b]));process.stdin.resume();`
       : emission === 'oversized'
         ? `const h=Buffer.alloc(4);h.writeUInt32LE(1024*1024+1);process.stdout.write(h);process.stdin.resume();`
-        : `process.stderr.write(Buffer.alloc(300*1024,120));process.stdin.resume();`;
+        : emission === 'missing-session-id'
+          ? `const b=Buffer.from('{"type":"session.ready"}');const h=Buffer.alloc(4);h.writeUInt32LE(b.length);process.stdout.write(Buffer.concat([h,b]));setTimeout(()=>process.exit(0),25);`
+          : `process.stderr.write(Buffer.alloc(300*1024,120));process.stdin.resume();`;
     const staged = await f.stage('first', host); const store = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
     await store.installVersion(staged); await store.activate(decisionFor(staged)); await store.completeActivation(decisionFor(staged));
     const input = new PassThrough(); const output = new PassThrough(); const messages = [];
@@ -110,5 +112,47 @@ for (const emission of ['lifecycle', 'oversized', 'stderr-flood']) {
     await runtime.closed;
     assert.deepEqual(messages, [{ type: 'error', message: 'Native runtime unavailable' }]);
     assert.throws(() => process.kill(runtime.childPid, 0), { code: 'ESRCH' });
+  });
+}
+
+test('trusted refresh replaces A with pending B on the same Chrome connection before completion', async t => {
+  const f=await runtimeFixture(t);
+  const echo=label=>`let buf=Buffer.alloc(0);process.stdin.on('data',c=>{buf=Buffer.concat([buf,c]);while(buf.length>=4&&buf.length>=4+buf.readUInt32LE(0)){let n=buf.readUInt32LE(0),m=JSON.parse(buf.subarray(4,n+4));buf=buf.subarray(n+4);let b=Buffer.from(JSON.stringify(m.type==='session.open'?{type:'session.ready',threadId:'shared'}:{type:'assistant.delta',text:${JSON.stringify(label)},phase:'unknown',turnId:'turn'}));let h=Buffer.alloc(4);h.writeUInt32LE(b.length);process.stdout.write(Buffer.concat([h,b]));}});`;
+  const a=await f.stage('a',echo('A'));const b=await f.stage('b',echo('B'));const store=new VersionStore({projectRoot:f.projectRoot,consumeDecision:consumer()});
+  await store.installVersion(a);await store.activate(decisionFor(a));await store.completeActivation(decisionFor(a));await store.installVersion(b);
+  const input=new PassThrough(),output=new PassThrough(),messages=[];const decoder=new NativeMessageDecoder(m=>messages.push(m));output.on('data',c=>decoder.push(c));
+  const runtime=await runBootstrap({store,nodePath:await realpath(process.execPath),codexPath:await realpath(process.execPath),workspace:f.projectRoot,input,output,signals:new EventEmitter()});t.after(()=>runtime.close());
+  input.write(encodeNativeMessage({type:'session.open',threadId:null}));await waitFor(()=>messages.length===1);const oldPid=runtime.childPid;
+  const decision=decisionFor(b,'m'.repeat(32));await store.activate(decision);
+  await assert.rejects(()=>store.completeActivation(decision),/refresh/i);
+  const active=await runtime.refreshPending(decision);
+  assert.equal(active.digest,b.manifest.bundleDigest);assert.equal(active.reviewId,'b');assert.equal(active.pid,runtime.childPid);assert.notEqual(active.pid,oldPid);
+  assert.throws(()=>process.kill(oldPid,0),{code:'ESRCH'});
+  input.write(encodeNativeMessage({type:'turn.start',text:'hello'}));await waitFor(()=>messages.some(m=>m.text==='B'));
+  assert.equal(messages.some(m=>m.text==='A'),false);await runtime.completeActivation(decision);
+  input.end();await runtime.closed;assert.equal((await new VersionStore({projectRoot:f.projectRoot}).resolveActiveHost()).digest,b.manifest.bundleDigest);
+  assert.throws(()=>parseBootstrapMessage({type:'runtime.refresh'}));
+});
+
+for (const boundary of ['during-stop','after-ready']) {
+  test(`disconnect ${boundary} of pending refresh reaps the proxy and restores A`, async t => {
+    const f=await runtimeFixture(t);
+    const host=`process.stdin.on('data',()=>{const b=Buffer.from('{"type":"session.ready","threadId":"shared"}');const h=Buffer.alloc(4);h.writeUInt32LE(b.length);process.stdout.write(Buffer.concat([h,b]));});`;
+    const a=await f.stage('a',host+'//A');const b=await f.stage('b',host+'//B');
+    const store=new VersionStore({projectRoot:f.projectRoot,consumeDecision:consumer()});
+    await store.installVersion(a);await store.activate(decisionFor(a));await store.completeActivation(decisionFor(a));await store.installVersion(b);
+    const input=new PassThrough(),output=new PassThrough(),messages=[];const decoder=new NativeMessageDecoder(m=>messages.push(m));output.on('data',c=>decoder.push(c));
+    const runtime=await runBootstrap({store,nodePath:await realpath(process.execPath),codexPath:await realpath(process.execPath),workspace:f.projectRoot,input,output,signals:new EventEmitter()});t.after(()=>runtime.close());
+    input.write(encodeNativeMessage({type:'session.open',threadId:null}));await waitFor(()=>messages.length===1);const oldPid=runtime.childPid;
+    const decision=decisionFor(b,'m'.repeat(32));await store.activate(decision);
+    const refresh=runtime.refreshPending(decision);let newPid;
+    if(boundary==='during-stop') {const cancelled=assert.rejects(refresh,/cancel/i);input.end();await cancelled;}
+    else {newPid=(await refresh).pid;input.end();}
+    await runtime.closed;
+    assert.throws(()=>process.kill(oldPid,0),{code:'ESRCH'});
+    if(newPid)assert.throws(()=>process.kill(newPid,0),{code:'ESRCH'});
+    await assert.rejects(()=>runtime.completeActivation(decision),/completion/i);
+    assert.equal((await new VersionStore({projectRoot:f.projectRoot}).resolveActiveHost()).digest,a.manifest.bundleDigest);
+    assert.equal(JSON.parse(await readFile(path.join(f.root,'recovery-state.json'),'utf8')).candidate.digest,b.manifest.bundleDigest);
   });
 }

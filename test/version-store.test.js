@@ -103,3 +103,47 @@ test('persisted nonce consumption blocks replay after coordinator and store rest
   await assert.rejects(() => restarted.activate(decisionFor(next)), /nonce/i);
   assert.equal((await restarted.resolveActiveHost()).digest, first.manifest.bundleDigest);
 });
+
+test('caller mutation after activate cannot replace the validated A decision with B', async t => {
+  const f = await runtimeFixture(t); const a = await f.stage('a'); const b = await f.stage('b', '// b');
+  let consumed;
+  const store = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: async d => { consumed = d; return { ...d, consumed: true }; } });
+  await store.installVersion(a); await store.installVersion(b);
+  const decision = decisionFor(a); const expected = { ...decision };
+  const activation = store.activate(decision);
+  Object.assign(decision, decisionFor(b, 'm'.repeat(32)));
+  const result = await activation;
+  assert.deepEqual(consumed, expected);
+  assert.equal(Object.isFrozen(consumed), true);
+  assert.equal(result.candidate.digest, a.manifest.bundleDigest);
+  await store.completeActivation(expected);
+  assert.equal((await store.resolveActiveHost()).digest, a.manifest.bundleDigest);
+});
+
+for (const operation of ['rollback', 'recover']) {
+  test(`${operation} restores healthy A even when failed pending B bytes are corrupt`, async t => {
+    const f = await runtimeFixture(t); const a = await f.stage('a'); const b = await f.stage('b', '// b');
+    const store = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
+    await store.installVersion(a); await store.activate(decisionFor(a)); await store.completeActivation(decisionFor(a));
+    await store.installVersion(b); await store.activate(decisionFor(b, 'm'.repeat(32)));
+    const corrupt = path.join(f.root, 'versions', b.manifest.bundleDigest, 'bundle/native-host/host.js');
+    await chmod(corrupt, 0o600); await writeFile(corrupt, 'corrupt B evidence'); await chmod(corrupt, 0o400);
+    if (operation === 'rollback') await store.rollback({ reviewId: 'b', candidateDigest: b.manifest.bundleDigest, failureRef: 'failed-b' });
+    else await new VersionStore({ projectRoot: f.projectRoot }).recover();
+    assert.equal((await store.resolveActiveHost()).digest, a.manifest.bundleDigest);
+    assert.equal(await readFile(corrupt, 'utf8'), 'corrupt B evidence');
+    const state = JSON.parse(await readFile(path.join(f.root, 'recovery-state.json'), 'utf8'));
+    assert.equal(state.candidate.digest, b.manifest.bundleDigest); assert.equal(state.phase, 'rolled-back');
+  });
+}
+
+test('rollback refuses corrupt previous A and preserves pending B state', async t => {
+  const f = await runtimeFixture(t); const a = await f.stage('a'); const b = await f.stage('b', '// b');
+  const store = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
+  await store.installVersion(a); await store.activate(decisionFor(a)); await store.completeActivation(decisionFor(a));
+  await store.installVersion(b); await store.activate(decisionFor(b, 'm'.repeat(32)));
+  const corrupt = path.join(f.root, 'versions', a.manifest.bundleDigest, 'bundle/native-host/host.js');
+  await chmod(corrupt, 0o600); await writeFile(corrupt, 'corrupt A'); await chmod(corrupt, 0o400);
+  await assert.rejects(() => store.rollback({ reviewId: 'b', candidateDigest: b.manifest.bundleDigest, failureRef: 'failed-b' }), /digest/i);
+  assert.equal(JSON.parse(await readFile(path.join(f.root, 'recovery-state.json'), 'utf8')).phase, 'pending-verification');
+});
