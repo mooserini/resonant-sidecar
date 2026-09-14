@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cp, lstat, mkdtemp, rename, rm, symlink } from 'node:fs/promises';
+import { cp, lstat, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { tmpdir } from 'node:os';
@@ -104,6 +104,62 @@ test('rejects a symlinked manifest read for declared capabilities', async t => {
     }),
     /symbolic link/i,
   );
+});
+
+test('rejects each optional Chrome permission declaration', async t => {
+  for (const optionalDeclaration of [
+    { optional_permissions: ['tabs'] },
+    { optional_host_permissions: ['<all_urls>'] },
+  ]) {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'resonant-sidecar-bundle-'));
+    t.after(async () => {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    });
+    await cp(root, temporaryRoot, { recursive: true });
+    await writeFile(path.join(temporaryRoot, 'extension', 'manifest.json'), JSON.stringify({
+      manifest_version: 3,
+      name: 'Minimal Pass',
+      version: '1.0.0',
+      permissions: ['nativeMessaging', 'sidePanel', 'storage'],
+      ...optionalDeclaration,
+    }));
+
+    await assert.rejects(
+      () => buildBundleManifest({
+        root: temporaryRoot,
+        files: FILES,
+        sourceCommit: COMMIT,
+        schemaVersion: 1,
+      }),
+      /optional.*permission/i,
+    );
+  }
+});
+
+test('records every npm lifecycle hook including preprepare and postprepare', async t => {
+  const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'resonant-sidecar-bundle-'));
+  t.after(async () => {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  });
+  await cp(root, temporaryRoot, { recursive: true });
+  await writeFile(path.join(temporaryRoot, 'package.json'), JSON.stringify({
+    name: 'minimal-pass',
+    version: '1.0.0',
+    private: true,
+    packageManager: 'npm@10.8.2',
+    scripts: {
+      preprepare: 'echo before',
+      postprepare: 'echo after',
+    },
+  }));
+
+  const manifest = await buildBundleManifest({
+    root: temporaryRoot,
+    files: FILES,
+    sourceCommit: COMMIT,
+    schemaVersion: 1,
+  });
+  assert.deepEqual(manifest.capabilities.lifecycleScripts, ['postprepare', 'preprepare']);
 });
 
 test('rejects traversal, duplicate paths, and manifest tampering', async () => {

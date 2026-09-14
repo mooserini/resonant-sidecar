@@ -32,6 +32,11 @@ function serialize(value, ancestors) {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) {
+          throw new TypeError('Unsupported JSON value: sparse array');
+        }
+      }
       return `[${value.map(item => serialize(item, ancestors)).join(',')}]`;
     }
 

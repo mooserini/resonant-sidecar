@@ -31,3 +31,8 @@ test('rejects values outside the supported JSON subset', () => {
   assert.throws(() => canonicalJson([Number.NaN]), /finite number/i);
   assert.throws(() => canonicalJson(new Date()), /plain object/i);
 });
+
+test('rejects sparse arrays rather than colliding with shorter arrays', () => {
+  assert.throws(() => canonicalJson(Array(1)), /sparse array/i);
+  assert.throws(() => canonicalJson([1, , 3]), /sparse array/i);
+});

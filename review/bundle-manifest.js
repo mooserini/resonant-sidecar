@@ -9,14 +9,34 @@ const LIFECYCLE_SCRIPTS = new Set([
   'preinstall',
   'install',
   'postinstall',
+  'preuninstall',
+  'uninstall',
+  'postuninstall',
   'prepack',
   'prepare',
+  'preprepare',
+  'postprepare',
   'prepublish',
   'prepublishOnly',
   'postpack',
   'preversion',
   'version',
   'postversion',
+  'pretest',
+  'test',
+  'posttest',
+  'prestop',
+  'stop',
+  'poststop',
+  'prestart',
+  'start',
+  'poststart',
+  'prerestart',
+  'restart',
+  'postrestart',
+  'preshrinkwrap',
+  'shrinkwrap',
+  'postshrinkwrap',
 ]);
 const DEPENDENCY_LOCKFILES = [
   'bun.lockb',
@@ -137,6 +157,9 @@ async function readDependencyLockfiles(root) {
 export async function readDeclaredCapabilities(root) {
   const extensionManifest = await readJson(root, 'extension/manifest.json', 'extension manifest');
   assertPlainObject(extensionManifest, 'extension manifest');
+  if (Object.hasOwn(extensionManifest, 'optional_permissions') || Object.hasOwn(extensionManifest, 'optional_host_permissions')) {
+    throw new TypeError('Optional Chrome permission declarations are unsupported');
+  }
   const packageJson = await readJson(root, 'package.json', 'package.json');
   assertPlainObject(packageJson, 'package.json');
 
