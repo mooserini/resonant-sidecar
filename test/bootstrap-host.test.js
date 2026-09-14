@@ -156,3 +156,80 @@ for (const boundary of ['during-stop','after-ready']) {
     assert.equal(JSON.parse(await readFile(path.join(f.root,'recovery-state.json'),'utf8')).candidate.digest,b.manifest.bundleDigest);
   });
 }
+
+async function racingBootstrap(t, { wrongB = false } = {}) {
+  const f=await runtimeFixture(t);const trace=path.join(f.projectRoot,'process-trace.jsonl');const spawned=[];
+  const host=label=>`import fs from 'node:fs';const trace=${JSON.stringify(trace)};const label=${JSON.stringify(label)};
+    const prior=fs.existsSync(trace)?fs.readFileSync(trace,'utf8').trim().split('\\n').map(JSON.parse).filter(e=>e.event==='spawn'):[];
+    const alive=prior.filter(e=>{try{process.kill(e.pid,0);return true;}catch{return false;}}).map(e=>e.pid);
+    const log=e=>fs.appendFileSync(trace,JSON.stringify({...e,label,pid:process.pid})+'\\n');log({event:'spawn',alive});
+    let buf=Buffer.alloc(0);process.stdin.on('data',c=>{buf=Buffer.concat([buf,c]);while(buf.length>=4&&buf.length>=4+buf.readUInt32LE(0)){
+      const n=buf.readUInt32LE(0),m=JSON.parse(buf.subarray(4,n+4));buf=buf.subarray(n+4);log({event:'request',...m});
+      if(m.type==='session.open') {const reply=()=>{const b=Buffer.from(JSON.stringify({type:'session.ready',threadId:label==='B'&&${wrongB}?'wrong-thread':m.threadId??'new-thread'})),h=Buffer.alloc(4);h.writeUInt32LE(b.length);process.stdout.write(Buffer.concat([h,b]));};
+        if(label==='A'){const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(path.join(f.projectRoot,'allow-a-ready'))})){clearInterval(timer);reply();}},10);}else reply();}
+    }});`;
+  const a=await f.stage('a',host('A'));const b=await f.stage('b',host('B'));const store=new VersionStore({projectRoot:f.projectRoot,consumeDecision:consumer()});
+  await store.installVersion(a);await store.activate(decisionFor(a));await store.completeActivation(decisionFor(a));await store.installVersion(b);
+  const input=new PassThrough(),output=new PassThrough(),messages=[];const decoder=new NativeMessageDecoder(m=>messages.push(m));output.on('data',c=>decoder.push(c));
+  const runtime=await runBootstrap({store,nodePath:await realpath(process.execPath),codexPath:await realpath(process.execPath),workspace:f.projectRoot,input,output,signals:new EventEmitter()});
+  const readTrace=async()=>{let text;try{text=await readFile(trace,'utf8');}catch(e){if(e.code==='ENOENT')return [];throw e;}const events=text.trim().split('\n').filter(Boolean).map(JSON.parse);for(const e of events)if(e.event==='spawn'&&!spawned.includes(e.pid))spawned.push(e.pid);return events;};
+  t.after(()=>{for(const pid of spawned){try{process.kill(-pid,'SIGKILL');}catch(e){if(e.code!=='ESRCH')throw e;}}});
+  return {...f,a,b,store,input,messages,runtime,readTrace,spawned};
+}
+
+test('lazy resolution racing trusted refresh never overlaps or loses ownership of spawned children',async t=>{
+  const f=await racingBootstrap(t);const original=f.store.resolveActiveHost.bind(f.store);let release,entered;
+  const gate=new Promise(r=>{release=r;});const resolving=new Promise(r=>{entered=r;});
+  f.store.resolveActiveHost=async()=>{entered();await gate;return original();};
+  f.input.write(encodeNativeMessage({type:'session.open',threadId:'existing-thread'}));await resolving;
+  const decision=decisionFor(f.b,'m'.repeat(32));await f.store.activate(decision);
+  const refresh=f.runtime.refreshPending(decision);
+  await Promise.race([refresh,new Promise(r=>setTimeout(r,250))]);release();await refresh;
+  await new Promise(r=>setTimeout(r,100));const events=await f.readTrace();
+  await f.runtime.completeActivation(decision);f.input.end();await f.runtime.closed;
+  assert.equal(events.some(e=>e.event==='spawn'&&e.alive.length>0),false,'new child overlapped an unreaped child');
+  for(const pid of f.spawned)assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+});
+
+test('refresh binds an in-flight explicit session.open before A reports readiness',async t=>{
+  const f=await racingBootstrap(t);f.input.write(encodeNativeMessage({type:'session.open',threadId:'existing-thread'}));
+  let events=[];await waitFor(()=>f.runtime.childPid!==undefined);
+  for(let i=0;i<100;i++){events=await f.readTrace();if(events.some(e=>e.event==='request'&&e.label==='A'))break;await new Promise(r=>setTimeout(r,10));}
+  assert.equal(f.messages.length,0);const decision=decisionFor(f.b,'m'.repeat(32));await f.store.activate(decision);
+  await f.runtime.refreshPending(decision);events=await f.readTrace();await f.runtime.completeActivation(decision);f.input.end();await f.runtime.closed;
+  assert.equal(events.find(e=>e.event==='request'&&e.label==='B').threadId,'existing-thread');
+  assert.equal(f.messages.some(m=>m.threadId==='new-thread'),false);
+  for(const pid of f.spawned)assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+});
+
+test('refresh fails closed when an initial null session has not acquired an identity',async t=>{
+  const f=await racingBootstrap(t);f.input.write(encodeNativeMessage({type:'session.open',threadId:null}));await waitFor(()=>f.runtime.childPid!==undefined);
+  await f.readTrace();const decision=decisionFor(f.b,'m'.repeat(32));await f.store.activate(decision);
+  let rejected;try{await f.runtime.refreshPending(decision);}catch(error){rejected=error;}
+  await f.readTrace();f.input.end();await f.runtime.closed;
+  assert.match(rejected?.message??'refresh was accepted',/session|identity/i);
+  assert.equal((await new VersionStore({projectRoot:f.projectRoot}).resolveActiveHost()).digest,f.a.manifest.bundleDigest);
+  assert.equal(f.messages.some(m=>m.threadId==='new-thread'),false);
+});
+
+test('disconnect while lazy resolution is suspended prevents all later spawns and completion',async t=>{
+  const f=await racingBootstrap(t);const original=f.store.resolveActiveHost.bind(f.store);let release,entered;
+  const gate=new Promise(r=>{release=r;});const resolving=new Promise(r=>{entered=r;});
+  f.store.resolveActiveHost=async()=>{entered();await gate;return original();};
+  f.input.write(encodeNativeMessage({type:'session.open',threadId:'existing-thread'}));await resolving;
+  const decision=decisionFor(f.b,'m'.repeat(32));await f.store.activate(decision);f.input.end();
+  await assert.rejects(()=>f.runtime.completeActivation(decision),/refresh/i);release();await f.runtime.closed;
+  assert.deepEqual(await f.readTrace(),[]);assert.equal(f.runtime.childPid,undefined);
+  assert.equal((await new VersionStore({projectRoot:f.projectRoot}).resolveActiveHost()).digest,f.a.manifest.bundleDigest);
+});
+
+test('wrong refresh session readiness cannot complete and every spawned child is reaped',async t=>{
+  const f=await racingBootstrap(t,{wrongB:true});f.input.write(encodeNativeMessage({type:'session.open',threadId:'existing-thread'}));await waitFor(()=>f.runtime.childPid!==undefined);
+  await f.readTrace();const decision=decisionFor(f.b,'m'.repeat(32));await f.store.activate(decision);
+  await assert.rejects(()=>f.runtime.refreshPending(decision),/cancel/i);await f.runtime.closed;const events=await f.readTrace();
+  await assert.rejects(()=>f.runtime.completeActivation(decision),/completion/i);
+  assert.equal(events.find(e=>e.event==='request'&&e.label==='B').threadId,'existing-thread');
+  assert.equal(f.messages.some(m=>m.threadId==='wrong-thread'),false);
+  for(const pid of f.spawned)assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+  assert.equal((await new VersionStore({projectRoot:f.projectRoot}).resolveActiveHost()).digest,f.a.manifest.bundleDigest);
+});

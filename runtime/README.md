@@ -67,6 +67,16 @@ PID and PGID for post-refresh evidence. The coordinator then calls
 `completeActivation`. No raw browser message can invoke refresh. Disconnect,
 readiness failure, or cancellation stops the group and recovers the prior pin;
 new bootstrap instances still perform startup recovery.
+Lazy startup, trusted refresh and shutdown share one serialized transition
+queue, including host resolution already in flight. Every spawned proxy stays
+in the ownership set until it has been stopped; starting an overlapping proxy
+is rejected. Completion requires the sole tracked proxy to match the refreshed
+PID and is unavailable during a transition. `childPid` retains the last PID
+after shutdown for absence checks; it is not activation authority.
+An explicit non-null `session.open` identity binds as soon as its browser frame
+validates, before asynchronous host resolution. Readiness must match that
+identity. If a null initial open has not returned an identity, refresh fails
+closed and rolls back; it never substitutes null into a replacement session.
 Its active child leads a process group; normal
 Codex descendants inherit that group. Disconnect/signals terminate and then
 kill the group, including descendants that outlive its leader. There is no

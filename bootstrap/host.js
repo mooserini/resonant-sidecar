@@ -17,51 +17,68 @@ export function parseBootstrapMessage(value) {
 
 export async function runBootstrap({ store, nodePath, codexPath, workspace, userHome, codexHome, coordinator, input = process.stdin, output = process.stdout, signals = process }) {
   await store.recover();
-  let proxy; let stopped = false; let closePromise; let resolveClosed; let queued = 0;
+  let proxy; let lastChildPid; let stopped = false; let closePromise; let resolveClosed; let queued = 0;
   let refreshing = null; let refreshed = null; let readyWait = null;
-  let runtimeState = null; let sessionThreadId = null; let generation = 0;
+  let runtimeState = null; let sessionThreadId = null; let sessionRequested = false; let generation = 0;
+  const owned = new Set(); let transitions = Promise.resolve(); let transitionBusy = false;
+  const serialize = action => {
+    const result = transitions.then(async () => {
+      transitionBusy = true;
+      try { return await action(); } finally { transitionBusy = false; }
+    });
+    transitions = result.catch(() => {});
+    return result;
+  };
+  const stopOwned = async () => {
+    ++generation;
+    for (const child of owned) { await child.close(); owned.delete(child); }
+    proxy = null; runtimeState = null;
+  };
   const closed = new Promise(resolve => { resolveClosed = resolve; });
   const send = message => { if (!stopped) writeFrame(output, message); };
-  store.bindRuntimeGuard(expected => !stopped && !refreshing && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId);
+  store.bindRuntimeGuard(expected => !stopped && !refreshing && !transitionBusy && owned.size === 1 && owned.has(proxy) && refreshed?.pid === proxy.pid && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId);
   const close = () => {
     if (closePromise) return closePromise;
     stopped = true; input.pause();
     refreshed = null;
     readyWait?.reject(new Error('Pending runtime refresh cancelled')); readyWait = null;
-    closePromise = (async () => {
+    closePromise = serialize(async () => {
       input.off('data', data); input.off('end', close); input.off('close', close); input.off('error', close);
       signals.off('SIGTERM', close); signals.off('SIGINT', close); signals.off('SIGHUP', close);
-      await proxy?.close();
+      await stopOwned();
       // A disconnected pending runtime can never be completed. Restore the
       // prior verified pin after its process group has been reaped.
       try { await store.recover(); } finally { resolveClosed(); }
-    })();
+    });
     return closePromise;
   };
   const failure = () => { try { send({ type: 'error', message: 'Native runtime unavailable' }); } catch {} void close().catch(() => {}); };
   const startProxy = active => {
+    if (stopped || proxy || owned.size !== 0) throw new Error('Proxy ownership transition invalid');
     const ownGeneration = ++generation;
     proxy = startNativeProxy({ nodePath, codexPath, active, workspace, userHome, codexHome, onFailure: failure, onMessage: message => {
       if (stopped || generation !== ownGeneration) return;
       if (message.type === 'session.ready') {
-        if (readyWait && readyWait.threadId !== null && message.threadId !== readyWait.threadId) { failure(); return; }
+        if (!sessionRequested || (sessionThreadId !== null && message.threadId !== sessionThreadId) || (readyWait && message.threadId !== readyWait.threadId)) { failure(); return; }
         sessionThreadId = message.threadId;
         readyWait?.resolve(); readyWait = null;
       }
       send(message);
     } });
+    owned.add(proxy);
+    lastChildPid = proxy.pid;
     runtimeState = Object.freeze({ digest: active.digest, reviewId: active.reviewId, hostPath: active.hostPath, pid: proxy.pid, pgid: proxy.pid });
   };
   const refreshPending = decision => {
     decision = snapshotDecision(decision);
     if (stopped || refreshing) return Promise.reject(new Error('Runtime refresh unavailable'));
     refreshed = null;
-    const operation = (async () => {
+    const transition = serialize(async () => {
       let timer;
       try {
-        const prior = proxy; ++generation; await prior?.close();
-        proxy = null; runtimeState = null;
+        await stopOwned();
         if (stopped) throw new Error('Runtime refresh cancelled');
+        if (sessionThreadId === null) throw new Error('Session identity unresolved for refresh');
         const active = await store.resolvePendingHost(decision);
         if (stopped) throw new Error('Runtime refresh cancelled');
         startProxy(active);
@@ -73,19 +90,33 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
         proxy.send({ type: 'session.open', threadId: sessionThreadId });
         await ready;
         if (stopped) throw new Error('Runtime refresh cancelled');
-        refreshed = Object.freeze({ decisionHash: sha256Bytes(decision.nonce) });
+        refreshed = Object.freeze({ decisionHash: sha256Bytes(decision.nonce), pid: proxy.pid });
         return runtimeState;
-      } catch (error) {
-        if (!stopped) await close();
-        throw error;
-      } finally { clearTimeout(timer); readyWait = null; refreshing = null; }
-    })();
+      } finally { clearTimeout(timer); readyWait = null; }
+    });
+    // Recovery is queued only after this transition releases ownership, never
+    // awaited from inside the same transition queue.
+    const operation = transition.catch(async error => {
+      if (!stopped) await close();
+      throw error;
+    }).finally(() => { refreshing = null; });
     refreshing = operation;
     return operation;
   };
   let queue = Promise.resolve();
   const decoder = new BoundedDecoder(value => {
     const route = parseBootstrapMessage(value); const bytes = Buffer.byteLength(JSON.stringify(route.message));
+    if (route.channel === 'conversation' && route.message.type === 'session.open') {
+      const requested = route.message.threadId;
+      if (requested !== null) {
+        if ((sessionThreadId !== null && sessionThreadId !== requested) || (sessionRequested && sessionThreadId === null)) throw new Error('Ambiguous session identity');
+        sessionThreadId = requested;
+      }
+      sessionRequested = true;
+      // Bind a non-null request at validation, before queuing or resolving a
+      // host. A repeated null open may reuse an already-bound session only.
+      route.message = { type: 'session.open', threadId: sessionThreadId };
+    }
     queued += bytes; if (queued > QUEUE_LIMIT) throw new Error('Input queue exceeded');
     queue = queue.then(async () => {
       if (stopped) return;
@@ -96,11 +127,14 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
       } else {
         if (refreshing) await refreshing;
         if (stopped) return;
-        if (!proxy) {
-          const active = await store.resolveActiveHost(); if (stopped) return;
-          startProxy(active);
-        }
-        proxy.send(route.message);
+        await serialize(async () => {
+          if (stopped) return;
+          if (!proxy) {
+            const active = await store.resolveActiveHost(); if (stopped) return;
+            startProxy(active);
+          }
+          proxy.send(route.message);
+        });
       }
     }).catch(failure).finally(() => { queued -= bytes; });
   });
@@ -110,7 +144,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   return {
     close, closed, refreshPending,
     completeActivation(decision) { return store.completeActivation(decision); },
-    get childPid() { return proxy?.pid; },
+    get childPid() { return proxy?.pid ?? lastChildPid; },
     get runtimeState() { return runtimeState; },
   };
 }
