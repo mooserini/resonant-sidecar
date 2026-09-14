@@ -45,6 +45,7 @@ function parseProcess(stdout, pid) {
 
 function parseDescriptors(stdout, pid, role, cdpPorts) {
   if (!/\0\n?$/.test(stdout)) throw failure();
+  const pseudoTypes = new Map([['cwd', 'DIR'], ['rtd', 'DIR'], ['txt', 'REG'], ['mem', 'REG']]);
   const records = []; const seen = new Set(); let relevant = false; let current;
   const assign = (key, value) => {
     if (Object.hasOwn(current, key) && current[key] !== value) throw failure();
@@ -58,9 +59,11 @@ function parseDescriptors(stdout, pid, role, cdpPorts) {
     else if (kind === 'f') {
       current = relevant ? { fd: value } : undefined;
       if (current) {
+        const numbered = /^\d+[rwu]?$/.test(value);
+        if (!numbered && !pseudoTypes.has(value)) throw failure();
         // txt/mem label mapped files and may repeat. Only numbered descriptors
         // and the process's working/root directories have singleton identities.
-        const identity = /^\d+[rwu]?$/.test(value) ? `fd:${Number.parseInt(value, 10)}` : ['cwd', 'rtd'].includes(value) ? value : null;
+        const identity = numbered ? `fd:${Number.parseInt(value, 10)}` : ['cwd', 'rtd'].includes(value) ? value : null;
         if (identity !== null) { if (seen.has(identity)) throw failure(); seen.add(identity); }
         records.push(current);
       }
@@ -68,18 +71,21 @@ function parseDescriptors(stdout, pid, role, cdpPorts) {
     else if (current && kind === 'T') {
       if (!/^[A-Z]{2}=.+$/.test(value)) throw failure();
       assign(`T${value.slice(0, 2)}`, value.slice(3));
-    }
+    } else if (current) throw failure();
   }
   const tcpStates = new Set(['CLOSED', 'LISTEN', 'SYN_SENT', 'SYN_RCVD', 'ESTABLISHED', 'CLOSE_WAIT', 'FIN_WAIT_1', 'CLOSING', 'LAST_ACK', 'FIN_WAIT_2', 'TIME_WAIT']);
   const descriptorTypes = new Set(['REG', 'DIR', 'CHR', 'FIFO', 'PIPE', 'unix', 'IPv4', 'IPv6', 'KQUEUE', 'FSEVENT', 'PSXSEM', 'PSXSHM', 'systm', 'NDRV', 'ROUTE']);
   const result = { descriptors: [], endpoints: [], listeners: [] };
   for (const entry of records) {
+    if (pseudoTypes.has(entry.fd)) {
+      if (entry.t !== pseudoTypes.get(entry.fd) || !entry.n?.startsWith('/') || entry.P !== undefined || Object.keys(entry).some(key => key.startsWith('T'))) throw failure();
+      if (entry.fd === 'cwd') result.cwd = pathIdentity(entry.n);
+      continue;
+    }
     if (entry.TST !== undefined && entry.P !== 'TCP') throw failure();
     if (entry.P !== undefined && !['IPv4', 'IPv6'].includes(entry.t)) throw failure();
-    if (entry.fd === 'cwd' && entry.t === 'DIR') { if (!entry.n?.startsWith('/')) throw failure(); result.cwd = pathIdentity(entry.n); continue; }
     if (['IPv4', 'IPv6'].includes(entry.t) && !['TCP', 'UDP', 'UDPLITE', 'ICMP', 'ICMPV6'].includes(entry.P)) throw failure();
     if (entry.P === 'TCP' && (!tcpStates.has(entry.TST) || !['IPv4', 'IPv6'].includes(entry.t) || !/^\d+[rwu]?$/.test(entry.fd))) throw failure();
-    if (!/^\d+[rwu]?$/.test(entry.fd)) { if (/^\d/.test(entry.fd)) throw failure(); continue; }
     if (!descriptorTypes.has(entry.t) || !entry.n) throw failure();
     const fd = Number.parseInt(entry.fd, 10);
     if (['PIPE', 'unix'].includes(entry.t)) {

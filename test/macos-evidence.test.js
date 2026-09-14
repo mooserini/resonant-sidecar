@@ -277,3 +277,23 @@ test('repeatable pseudo labels cannot hide uncertain listener evidence or duplic
     await assert.rejects(collectMacOSEvidence({ ...policy(), runner: runner({ '/usr/sbin/lsof': () => ({ exitCode: 0, stderr: '', stdout }) }).run }), /evidence/);
   }
 });
+
+for (const [label, fields] of [
+  ['unknown', 'tUNKNOWN\0n/private/mapping'],
+  ['unknown', 'tREG\0n/private/mapping'],
+  ['txt', 'tUNKNOWN\0n/private/mapping'],
+  ['mem', 'tDIR\0n/private/mapping'],
+  ['txt', 'n/private/mapping'],
+  ['mem', 'tREG'],
+  ['txt', 'tREG\0n'],
+  ['mem', 'tREG\0nrelative-mapping'],
+  ['txt', 'tREG\0n/private/mapping\0TQR=0'],
+  ['mem', 'tREG\0n/private/mapping\0xunexpected-field'],
+  ['rtd', 'tREG\0n/'],
+]) {
+  test(`rejects unsupported pseudo-descriptor form ${label}/${fields.replaceAll('\0', '/')}`, async () => {
+    const repeat = ['cwd', 'rtd'].includes(label) ? 1 : 2;
+    const stdout = `${lsof.replaceAll('\n', '\0\n')}p103\0\n${(`f${label}\0${fields}\0\n`).repeat(repeat)}`;
+    await assert.rejects(collectMacOSEvidence({ ...policy(), runner: runner({ '/usr/sbin/lsof': () => ({ exitCode: 0, stderr: '', stdout }) }).run }), /evidence/);
+  });
+}
