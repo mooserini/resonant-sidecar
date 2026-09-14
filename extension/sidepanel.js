@@ -98,19 +98,27 @@ function handleEvent(event) {
 function renderReview() {
   const state = session.reviewState;
   const labels = { available: 'Update available', requested: 'Review in progress', reviewing: 'Review in progress', eligible: 'Ready to refresh', accepting: 'Refresh requested', activating: 'Refreshing', completed: 'Refresh complete', failed: 'Review failed' };
-  const focusWasInCard = reviewCard.contains(document.activeElement);
+  const focused = document.activeElement;
+  const focusWasInCard = reviewCard.contains(focused);
+  const visible = state === 'failed' ? ['open-report', 'open-desktop', 'dismiss-review'] : state === 'completed' ? ['dismiss-review'] : state === 'eligible' ? ['accept-review', 'reject-review'] : state === 'available' ? ['start-review', 'accept-review'] : ['accept-review'];
+  const controls = Object.entries(reviewButtons).map(([id, button]) => ({ button,
+    hidden: !visible.includes(id),
+    disabled: (id === 'accept-review' && state !== 'eligible') || (['open-report', 'open-desktop'].includes(id) && !session.canNavigateReview),
+  }));
+  // Chromium may blur a disabled/hidden button immediately. Decide where its
+  // focus belongs from the old element and the intended state, before writes.
+  const displacesFocus = focusWasInCard && controls.some(({ button, hidden, disabled }) => button === focused && (hidden || disabled));
   reviewCard.hidden = !Object.hasOwn(labels, state);
   if (reviewCard.hidden) { if (focusWasInCard) (session.turnActive ? stopButton : text).focus(); return; }
   reviewTitle.textContent = labels[state];
   reviewStatus.hidden = state === 'failed';
   reviewStatus.textContent = state === 'eligible' ? 'Verification passed. Accept this reviewed candidate or reject it.' : state === 'completed' ? 'The refreshed runtime was verified.' : 'Accept becomes available after verification.';
-  const visible = state === 'failed' ? ['open-report', 'open-desktop', 'dismiss-review'] : state === 'completed' ? ['dismiss-review'] : state === 'eligible' ? ['accept-review', 'reject-review'] : state === 'available' ? ['start-review', 'accept-review'] : ['accept-review'];
-  for (const [id, button] of Object.entries(reviewButtons)) {
-    button.hidden = !visible.includes(id);
-    button.disabled = (id === 'accept-review' && state !== 'eligible') || (['open-report', 'open-desktop'].includes(id) && !session.canNavigateReview);
+  for (const { button, hidden, disabled } of controls) {
+    button.hidden = hidden;
+    button.disabled = disabled;
   }
   announcement.textContent = labels[state];
-  if (focusWasInCard && (document.activeElement.hidden || document.activeElement.disabled)) reviewTitle.focus();
+  if (displacesFocus) reviewTitle.focus();
 }
 
 const session = new SidecarSession({

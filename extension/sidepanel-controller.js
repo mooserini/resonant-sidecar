@@ -21,6 +21,7 @@ function lifecycleEvent(value) {
 
 export class SidecarSession {
   #reviewState = 'idle'; #review = null; #decision = null; #statusRequested = false; #connecting = null;
+  #connectionGeneration = 0;
   get reviewState() { return this.#reviewState; }
   get canNavigateReview() { return this.#reviewState === 'failed' && this.#review !== null; }
   constructor({ connectNative, storage, onEvent = () => {} }) {
@@ -35,22 +36,18 @@ export class SidecarSession {
   async connect() {
     if (this.port) return;
     if (this.#connecting) return this.#connecting;
-    this.#connecting = this.#connect();
-    try { await this.#connecting; } finally { this.#connecting = null; }
+    const attempt = this.#connect(++this.#connectionGeneration);
+    this.#connecting = attempt;
+    try { await attempt; } finally { if (this.#connecting === attempt) this.#connecting = null; }
   }
 
-  async #connect() {
+  async #connect(generation) {
     const stored = await this.storage.get(THREAD_STORAGE_KEY);
+    if (generation !== this.#connectionGeneration) return;
     this.port = this.connectNative(HOST_NAME);
     const port = this.port;
     port.onMessage.addListener(message => { if (this.port === port) this.#handleMessage(message); });
-    port.onDisconnect.addListener(() => {
-      if (this.port !== port) return;
-      this.turnActive = false;
-      this.port = null;
-      this.#reviewState = 'idle'; this.#review = this.#decision = null; this.#statusRequested = false;
-      this.onEvent({ type: 'connection.closed' });
-    });
+    port.onDisconnect.addListener(() => this.#closeConnection(port));
     this.port.postMessage({
       type: 'session.open',
       threadId: typeof stored[THREAD_STORAGE_KEY] === 'string'
@@ -72,7 +69,20 @@ export class SidecarSession {
   }
 
   disconnect() {
-    if (this.port) this.port.disconnect();
+    const port = this.port;
+    try { this.#closeConnection(port); }
+    finally { port?.disconnect(); }
+  }
+
+  #closeConnection(port) {
+    if (this.port !== port || (!port && !this.#connecting)) return;
+    ++this.#connectionGeneration;
+    this.port = null; this.#connecting = null; this.turnActive = false;
+    this.#reviewState = 'idle'; this.#review = this.#decision = null; this.#statusRequested = false;
+    this.pending = Promise.resolve();
+    // Local Port.disconnect need not notify this end. Clear authority before
+    // notifying the UI or invoking a potentially reentrant Port.disconnect.
+    this.onEvent({ type: 'connection.closed' });
   }
 
   requestUpdateStatus() {

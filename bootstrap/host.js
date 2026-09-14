@@ -45,7 +45,17 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     proxy = null; runtimeState = null;
   };
   const closed = new Promise(resolve => { resolveClosed = resolve; });
-  const send = message => { if (!stopped) writeFrame(output, message); };
+  const send = message => {
+    if (stopped) return;
+    try { writeFrame(output, message); }
+    catch (error) {
+      // A broken output channel is fatal regardless of which lane emitted the
+      // frame. Close synchronously invalidates lifecycle grants before an
+      // adapter can mistake this for a recoverable coordinator failure.
+      void close().catch(() => {});
+      throw error;
+    }
+  };
   store.bindRuntimeGuard(expected => !stopped && !refreshing && (!transitionBusy || leaseActive) && owned.size === 1 && owned.has(proxy) && refreshed?.pid === proxy.pid && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId && (expected.pid === undefined || expected.pid === runtimeState.pid) && (expected.threadId === undefined || expected.threadId === runtimeState.threadId));
   const close = () => {
     if (closePromise) return closePromise;

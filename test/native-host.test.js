@@ -5,6 +5,7 @@ import test from 'node:test';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { runBootstrap, parseBootstrapMessage } from '../bootstrap/host.js';
+import { QUEUE_LIMIT } from '../bootstrap/native-proxy.js';
 import { createLifecycleRouter, parseLifecycleEvent } from '../native-host/sidecar-protocol.js';
 
 import { NativeMessageDecoder, encodeNativeMessage } from '../native-host/native-framing.js';
@@ -103,8 +104,9 @@ test('returns a safe error for unsupported browser messages', async t => {
 
 const lifecycleBinding = { reviewId: 'review-1', candidateDigest: 'a'.repeat(64) };
 const humanDecision = { ...lifecycleBinding, policyDigest: 'b'.repeat(64), action: 'accept', nonce: 'n'.repeat(43) };
-async function lifecycleHost(t, overrides = {}) {
+async function lifecycleHost(t, overrides = {}, presentationOverrides = {}) {
   const input = new PassThrough(), output = new PassThrough(), messages = [], conversation = [], calls = [];
+  const effects = { closes: 0, recoveries: 0 };
   const decoder = new NativeMessageDecoder(m => messages.push(m)); output.on('data', b => decoder.push(b));
   const coordinator = {
     checkAvailability: async () => ({ state: 'available', ...lifecycleBinding }),
@@ -114,15 +116,74 @@ async function lifecycleHost(t, overrides = {}) {
   };
   const runtime = await runBootstrap({ input, output, signals: new EventEmitter(), coordinator,
     receiptStore: { verifyChain: async () => ({ state: 'intact', receipts: [{ reviewId: 'review-1', candidateBundleDigest: 'a'.repeat(64), policySnapshotHash: 'b'.repeat(64), eventType: 'review-failed', directory: '/trusted/review-receipts/final' }] }) },
-    presentation: { openReviewReport: async p => { calls.push(p); return { status: 'opened' }; }, openChromeDeveloperProject: async () => { calls.push('desktop'); return { status: 'opened', project: { id: 'metadata-only' } }; } },
-    store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: 'c'.repeat(64), reviewId: 'old' }) },
-    proxyFactory: () => ({ pid: 123, send: m => conversation.push(m), close: async () => {} }),
+    presentation: { openReviewReport: async p => { calls.push(p); return { status: 'opened' }; }, openChromeDeveloperProject: async () => { calls.push('desktop'); return { status: 'opened', project: { id: 'metadata-only' } }; }, ...presentationOverrides },
+    store: { recover: async () => { effects.recoveries++; }, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: 'c'.repeat(64), reviewId: 'old' }) },
+    proxyFactory: () => ({ pid: 123, send: m => conversation.push(m), close: async () => { effects.closes++; } }),
   });
   t.after(() => runtime.close());
   const sendMessage = m => input.write(encodeNativeMessage(m));
   const settle = async predicate => { for (let n = 0; n < 100; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 5)); } assert.fail('Lifecycle did not settle'); };
-  return { messages, conversation, calls, sendMessage, settle };
+  return { messages, conversation, calls, sendMessage, settle, input, output, runtime, effects };
 }
+
+for (const event of ['update.available', 'review.started', 'review.eligible', 'review.failed', 'activation.started', 'activation.completed', 'activation.rolledBack']) {
+  for (const mode of ['overflow', 'write-throw']) test(`${mode} while emitting ${event} closes the transport and reaps the runtime once`, async t => {
+    let starts = 0;
+    const h = await lifecycleHost(t, {
+      startReview: async () => {
+        starts++;
+        if (event === 'review.failed') throw new Error('PRIVATE coordinator diagnostic');
+        return { state: 'eligible', ...lifecycleBinding, decision: humanDecision, rejection: { ...humanDecision, action: 'reject', nonce: 'r'.repeat(43) } };
+      },
+      acceptReview: async () => ({ state: event === 'activation.rolledBack' ? 'rolled-back' : 'activated', ...lifecycleBinding }),
+    });
+    h.sendMessage({ type: 'turn.start', text: 'healthy A' }); await h.settle(() => h.conversation.length === 1);
+    let attempted = false;
+    if (mode === 'write-throw') {
+      const write = h.output.write.bind(h.output);
+      h.output.write = bytes => {
+        const message = JSON.parse(bytes.subarray(4));
+        if (message.type === event) { attempted = true; throw new Error('PRIVATE transport diagnostic'); }
+        return write(bytes);
+      };
+    } else {
+      let preceding = event === 'update.available' ? null : event === 'review.started' ? 'update.available' : ['review.eligible', 'review.failed'].includes(event) ? 'review.started' : event === 'activation.started' ? 'review.eligible' : 'activation.started';
+      const overflow = () => { attempted = true; Object.defineProperty(h.output, 'writableLength', { configurable: true, value: QUEUE_LIMIT }); };
+      if (!preceding) overflow();
+      else h.output.on('data', bytes => { if (JSON.parse(bytes.subarray(4)).type === preceding) overflow(); });
+    }
+    h.sendMessage({ type: 'update.status' });
+    if (event !== 'update.available') {
+      await h.settle(() => h.messages.some(m => m.type === 'update.available'));
+      h.sendMessage({ type: 'review.start', ...lifecycleBinding });
+    }
+    if (event.startsWith('activation.')) {
+      await h.settle(() => h.messages.some(m => m.type === 'review.eligible'));
+      const { action, ...decision } = humanDecision; h.sendMessage({ type: 'review.accept', ...decision });
+    }
+    await h.settle(() => attempted);
+    await h.settle(() => h.effects.closes === 1);
+    await h.runtime.closed;
+    assert.equal(h.effects.recoveries, 2); assert.equal(h.input.listenerCount('data'), 0);
+    assert.equal(h.messages.some(m => JSON.stringify(m).includes('PRIVATE')), false);
+    if (['update.available', 'review.started'].includes(event)) assert.equal(starts, 0);
+    await h.runtime.close(); assert.equal(h.effects.closes, 1);
+  });
+}
+
+for (const source of ['coordinator', 'custody', 'presentation']) test(`${source} failure retains healthy A when the output transport works`, async t => {
+  const error = new Error('PRIVATE diagnostic'); if (source === 'custody') error.name = 'CustodyError';
+  const h = await lifecycleHost(t,
+    { startReview: async () => { if (source !== 'presentation') throw error; return { state: 'review-failed', ...lifecycleBinding }; } },
+    { openReviewReport: async () => { throw error; } });
+  h.sendMessage({ type: 'turn.start', text: 'healthy A' }); await h.settle(() => h.conversation.length === 1);
+  h.sendMessage({ type: 'update.status' }); await h.settle(() => h.messages.length === 1);
+  h.sendMessage({ type: 'review.start', ...lifecycleBinding }); await h.settle(() => h.messages.some(m => m.type === 'review.failed'));
+  if (source === 'presentation') { h.sendMessage({ type: 'review.openReport', ...lifecycleBinding }); await h.settle(() => h.messages.filter(m => m.type === 'review.failed').length === 2); }
+  h.sendMessage({ type: 'turn.interrupt' }); await h.settle(() => h.conversation.length === 2);
+  assert.equal(h.effects.closes, 0); assert.equal(h.effects.recoveries, 1); assert.equal(h.input.listenerCount('data'), 1);
+  assert.deepEqual(h.messages.at(-1), { type: 'review.failed', ...lifecycleBinding });
+});
 test('all new lifecycle commands route exclusively through the trusted bootstrap', () => {
   for (const m of [{ type: 'update.status' }, { type: 'review.start', ...lifecycleBinding }, ...['review.accept', 'review.reject'].map(type => { const { action, ...d } = humanDecision; return { type, ...d }; }), ...['review.openReport', 'review.openDesktop'].map(type => ({ type, ...lifecycleBinding }))]) assert.equal(parseBootstrapMessage(m).channel, 'lifecycle');
 });

@@ -21,13 +21,17 @@ class FakePort {
   onDisconnect = new FakeEvent();
   onMessage = new FakeEvent();
   posted = [];
+  closed = false;
+  disconnectCalls = 0;
 
   postMessage(message) {
+    if (this.closed) throw new Error('Port is disconnected');
     this.posted.push(message);
   }
 
   disconnect() {
-    this.onDisconnect.emit();
+    this.disconnectCalls++;
+    this.closed = true; // Chrome need not emit onDisconnect at this local end.
   }
 }
 
@@ -96,7 +100,7 @@ test('failure navigation uses current binding only and disconnect destroys appro
   session.openReport(); assert.deepEqual(port.posted.at(-1), { type: 'review.openReport', ...reviewBinding });
   session.openDesktop(); assert.deepEqual(port.posted.at(-1), { type: 'review.openDesktop', ...reviewBinding });
   session.dismissReview(); assert.throws(() => session.openReport());
-  port.disconnect(); assert.equal(session.reviewState, 'idle');
+  port.onDisconnect.emit(); assert.equal(session.reviewState, 'idle');
   port.onMessage.emit(eligible); assert.throws(() => session.acceptReview());
 });
 
@@ -118,26 +122,37 @@ test('review card offers semantic controls, understandable disabled acceptance a
   assert.match(css, /:focus-visible/); assert.match(css, /flex-wrap:\s*wrap/);
 });
 
-test('rendered failure has only fixed navigation, keeps Stop live, and never renders diagnostic payloads', async () => {
+async function renderedPanel() {
   const html = await readFile(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const script = await readFile(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
   const elements = new Map();
   const document = { activeElement: null, querySelector: selector => elements.get(selector.slice(1)), getElementById: id => elements.get(id), createElement: () => element('') };
   function element(id) {
-    return { id, textContent: '', value: '', disabled: false, hidden: false, dataset: {}, children: [], listeners: {},
+    let disabled = false, hidden = false;
+    return { id, textContent: '', value: '', dataset: {}, children: [], listeners: {},
+      get disabled() { return disabled; },
+      set disabled(value) { disabled = value; if (value && document.activeElement === this) document.activeElement = document.body; },
+      get hidden() { return hidden; },
+      set hidden(value) { hidden = value; if (value && (document.activeElement === this || this.contains(document.activeElement))) document.activeElement = document.body; },
       addEventListener(name, callback) { this.listeners[name] = callback; },
       click() { if (!this.disabled && !this.hidden) this.listeners.click?.(); },
-      focus() { document.activeElement = this; },
+      focus() { if (!this.disabled && !this.hidden) document.activeElement = this; },
       contains(other) { return this.id === 'review-card' && ['review-title', 'start-review', 'accept-review', 'reject-review', 'open-report', 'open-desktop', 'dismiss-review'].includes(other?.id); },
       append(...children) { this.children.push(...children); }, scrollIntoView() {},
     };
   }
+  document.body = element('body'); document.activeElement = document.body;
   for (const match of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
     const node = element(match[1]); node.hidden = /\bhidden\b/.test(match[0]); node.disabled = /\bdisabled\b/.test(match[0]); elements.set(node.id, node);
   }
   const port = new FakePort(), storage = createStorage();
   await vm.runInNewContext(`(async () => { ${script.replace(/^import .*;\n/, '')} })()`, { SidecarSession, document, window: { addEventListener() {} }, chrome: { runtime: { connectNative: () => port }, storage: { session: storage } } });
   const node = id => elements.get(id);
+  return { node, document, port, elements };
+}
+
+test('rendered failure has only fixed navigation, keeps Stop live, and never renders diagnostic payloads', async () => {
+  const { node, document, port, elements } = await renderedPanel();
   port.onMessage.emit({ type: 'update.available', ...reviewBinding });
   assert.equal(node('review-card').hidden, false); assert.equal(node('accept-review').disabled, true);
   node('accept-review').click(); assert.equal(port.posted.at(-1).type, 'update.status');
@@ -160,6 +175,41 @@ test('rendered failure has only fixed navigation, keeps Stop live, and never ren
   port.onMessage.emit({ type: 'session.ready', threadId: 'same-thread' });
   assert.equal(node('send-button').disabled, false, 'refreshed runtime readiness must release the old turn composer');
   assert.equal(node('stop-button').disabled, true);
+});
+
+for (const action of ['accept', 'reject', 'failure', 'dismiss']) test(`focus survives Chromium blur when ${action} hides or disables the focused control`, async () => {
+  const { node, document, port } = await renderedPanel();
+  port.onMessage.emit({ type: 'update.available', ...reviewBinding }); node('start-review').click();
+  port.onMessage.emit({ type: 'review.started', ...reviewBinding }); port.onMessage.emit(eligible);
+  if (action === 'accept') { node('accept-review').focus(); node('accept-review').click(); assert.equal(document.activeElement, node('review-title')); }
+  if (action === 'reject') { node('reject-review').focus(); node('reject-review').click(); assert.equal(document.activeElement, node('turn-text')); }
+  if (action === 'failure') { node('accept-review').focus(); port.onMessage.emit({ type: 'review.failed', ...reviewBinding }); assert.equal(document.activeElement, node('review-title')); }
+  if (action === 'dismiss') { port.onMessage.emit({ type: 'review.failed', ...reviewBinding }); node('dismiss-review').focus(); node('dismiss-review').click(); assert.equal(document.activeElement, node('turn-text')); }
+});
+
+for (const origin of ['local', 'remote', 'reentrant-local']) test(`${origin} disconnect clears authority synchronously, once, and cannot poison reconnect`, async () => {
+  const ports = [new FakePort(), new FakePort()]; let connections = 0, closed = 0;
+  const session = new SidecarSession({ connectNative: () => ports[connections++], storage: createStorage(), onEvent: e => {
+    if (e.type === 'connection.closed') { closed++; assert.equal(session.port, null); assert.equal(session.reviewState, 'idle'); assert.equal(session.turnActive, false); assert.throws(() => session.acceptReview()); if (origin === 'reentrant-local') session.disconnect(); }
+  } });
+  await session.connect(); session.requestUpdateStatus(); ports[0].onMessage.emit({ type: 'update.available', ...reviewBinding }); session.startReview(); ports[0].onMessage.emit({ type: 'review.started', ...reviewBinding }); ports[0].onMessage.emit(eligible); ports[0].onMessage.emit({ type: 'turn.started' });
+  if (origin === 'remote') ports[0].onDisconnect.emit(); else session.disconnect();
+  assert.equal(closed, 1); assert.equal(session.port, null); assert.equal(session.canNavigateReview, false);
+  session.disconnect(); assert.equal(closed, 1);
+  await session.connect(); assert.equal(connections, 2); assert.deepEqual(ports[1].posted, [{ type: 'session.open', threadId: null }]);
+  for (const message of [eligible, { type: 'session.ready', threadId: 'stale' }, { type: 'turn.started' }]) ports[0].onMessage.emit(message);
+  ports[0].onDisconnect.emit(); assert.equal(session.port, ports[1]); assert.equal(session.turnActive, false); assert.equal(session.reviewState, 'idle'); assert.equal(closed, 1);
+  assert.equal(ports[0].disconnectCalls, origin === 'remote' ? 0 : 1);
+});
+
+test('disconnect cancels an unresolved connection before native connection creation and permits a fresh attempt', async t => {
+  let release, connections = 0, reads = 0, closed = 0;
+  const gate = new Promise(r => { release = r; }); const port = new FakePort();
+  t.after(() => release());
+  const session = new SidecarSession({ connectNative: () => { connections++; return port; }, storage: { get: async () => { if (++reads === 1) await gate; return {}; } }, onEvent: e => { if (e.type === 'connection.closed') closed++; } });
+  const first = session.connect(); session.disconnect(); assert.equal(closed, 1); await session.connect();
+  assert.equal(connections, 1); release(); await first;
+  assert.equal(connections, 1); assert.equal(closed, 1); assert.equal(session.port, port);
 });
 
 test('runtime session readiness resets the prior turn after a refresh without starting a new turn', async () => {
