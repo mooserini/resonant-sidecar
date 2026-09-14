@@ -6,7 +6,7 @@ import { snapshotHumanDecision } from './decision-nonce.js';
 import { snapshotRecoveryBinding } from '../bootstrap/recovery-state.js';
 import { sanitizeEvidence } from './redaction.js';
 import { verifyOwnershipTopology, assertOwnershipPolicy } from './process-ownership.js';
-import { CustodyError } from './receipt-store.js';
+import { CustodyError, CompletionCancelledError } from './receipt-store.js';
 
 const POLICY = JSON.parse(readFileSync(new URL('../policy/review-policy.v1.json', import.meta.url), 'utf8'));
 const POLICY_DIGEST = sha256Json(POLICY);
@@ -22,7 +22,7 @@ export class ReviewCoordinator {
   #project = { activeVersion: {}, candidateVersion: {}, sourceHashes: {}, dependencyLock: {}, testResults: {} };
   #os = { before: {}, verification: {}, after: {} }; #attestation = null; #afterPolicy = null;
   constructor(deps = {}) {
-    for (const [object, methods] of [[deps.receiptStore, ['verifyChain', 'finalizeEvent']], [deps.nonceStore, ['issue', 'consume', 'recover']], [deps.versionStore, ['resolveActiveHost', 'installVersion', 'activate', 'rollback', 'recover', 'completeActivation', 'resumePendingActivation', 'resolveRecoveredHost', 'completeRecoveredActivation']], [deps.candidateSource, ['inspect', 'stage']], [deps.runtime, ['snapshot', 'refreshPending', 'refreshRecovered', 'stopCandidate', 'restartPrevious']]]) {
+    for (const [object, methods] of [[deps.receiptStore, ['verifyChain', 'finalizeEvent']], [deps.nonceStore, ['issue', 'consume', 'recover']], [deps.versionStore, ['resolveActiveHost', 'installVersion', 'activate', 'rollback', 'recover', 'completeActivation', 'resumePendingActivation', 'resolveRecoveredHost', 'completeRecoveredActivation']], [deps.candidateSource, ['inspect', 'stage']], [deps.runtime, ['snapshot', 'refreshPending', 'refreshRecovered', 'stopCandidate', 'restartPrevious', 'withTransition']]]) {
       if (!object || methods.some(m => typeof object[m] !== 'function')) throw new TypeError('Trusted coordinator dependencies required');
     }
     if (['deterministicReview', 'codexReview', 'collectEvidence', 'ownershipPolicy'].some(k => typeof deps[k] !== 'function')) throw new TypeError('Trusted coordinator dependencies required');
@@ -78,7 +78,7 @@ export class ReviewCoordinator {
     // mutations; never append a replacement receipt over a broken chain.
     let receipt;
     try { receipt = await this.#d.receiptStore.finalizeEvent(input); }
-    catch (error) { this.#halted = true; throw new CustodyError('Receipt finalization failed'); }
+    catch (error) { if (error instanceof CompletionCancelledError) throw error; this.#halted = true; throw new CustodyError('Receipt finalization failed'); }
     if (receipt.eventType !== next || receipt.reviewId !== this.#review.reviewId || receipt.previousReceiptHash !== this.#tail) { this.#halted = true; throw new CustodyError(); }
     this.#tail = receipt.receiptHash; this.#state = next;
     if (next === 'custody-broken') this.#halted = true;
@@ -199,35 +199,38 @@ export class ReviewCoordinator {
       await this.#integrity();
       const proof = await this.#consumeHuman(d); this.#grant = proof; this.#proofGiven = false; this.#decisionHash = proof.nonceDigest;
       await this.#move('human-accepted'); await this.#move('activating');
-      try {
-        await this.#integrity(); await this.#d.versionStore.installVersion(this.#staged);
-        await this.#integrity(); await this.#d.versionStore.activate(d);
-        await this.#integrity();
-        const runtime = await this.#d.runtime.refreshPending(d);
-        const authorization = await this.#postRefresh(runtime, proof);
-        await this.#integrity();
-        const binding = boundRecovery(proof);
-        await this.#d.versionStore.completeReviewedActivation(binding, authorization, () => this.#move('activated'));
-        await this.#d.versionStore.verifyCompletedActivation(binding);
-        return this.#view();
-      } catch (error) { if (this.#halted || this.#state === 'activated') throw error; return this.#rollback('activation-operation-failed'); }
-      finally { this.#grant = null; }
+      return this.#d.runtime.withTransition(async owner => {
+        try {
+          await this.#integrity(); await this.#d.versionStore.installVersion(this.#staged);
+          await this.#integrity(); await this.#d.versionStore.activate(d);
+          await this.#integrity();
+          const runtime = await owner.refreshPending(d);
+          const authorization = await this.#postRefresh(runtime, proof, owner);
+          await this.#integrity();
+          const binding = boundRecovery(proof);
+          await this.#d.versionStore.completeReviewedActivation(binding, authorization, () => this.#move('activated'));
+          await this.#d.versionStore.verifyCompletedActivation(binding);
+          return this.#view();
+        } catch (error) { if (this.#halted || this.#state === 'activated') throw error; return this.#rollback('activation-operation-failed', owner); }
+        finally { this.#grant = null; }
+      });
     });
   }
-  async #postRefresh(runtime, proof) {
+  async #postRefresh(runtime, proof, owner) {
     const snapshot = clone(runtime);
     if (!Number.isSafeInteger(snapshot.pid) || snapshot.pid < 1 || snapshot.digest !== proof.candidateDigest || snapshot.reviewId !== proof.reviewId || snapshot.threadId !== proof.threadId) throw new Error('Post-refresh runtime binding mismatch');
     await this.#evidence('after', snapshot);
-    const live = this.#d.runtime.snapshot();
+    const live = owner.snapshot();
     for (const k of ['pid', 'digest', 'reviewId', 'threadId']) if (snapshot[k] !== live?.[k]) throw new Error('Runtime changed during post-refresh evidence');
     return { runtime: Object.fromEntries(['pid', 'digest', 'reviewId', 'threadId'].map(k => [k, snapshot[k]])), ownershipPolicy: clone(this.#afterPolicy), osEvidence: clone(this.#os) };
   }
-  async #rollback(reasonCode) {
+  async #rollback(reasonCode, owner) {
+    if (!owner) return this.#d.runtime.withTransition(runtime => this.#rollback(reasonCode, runtime));
     if (this.#state === 'human-accepted') await this.#move('activating');
     if (this.#state === 'activating') await this.#move('activation-failed', reasonCode);
     if (this.#state === 'activation-failed') await this.#move('rolling-back');
     try {
-      await this.#integrity(); await this.#d.runtime.stopCandidate();
+      await this.#integrity(); await owner.stopCandidate();
       // recover handles partial journals and an already-restored bootstrap.
       // Neither recovery nor rollback verifies the failed candidate first.
       await this.#integrity();
@@ -236,10 +239,10 @@ export class ReviewCoordinator {
       const pin = await this.#d.versionStore.resolveActiveHost();
       if (pin.digest !== this.#review.activeDigest) throw new Error('Previous pin was not restored');
       await this.#integrity();
-      const restored = await this.#d.runtime.restartPrevious();
+      const restored = await owner.restartPrevious();
       if (restored.digest !== this.#review.activeDigest) throw new Error('Previous runtime mismatch');
       await this.#evidence('after', restored);
-      const current = this.#d.runtime.snapshot();
+      const current = owner.snapshot();
       if (current?.pid !== restored.pid || current?.digest !== restored.digest || current?.threadId !== restored.threadId) throw new Error('Restored runtime changed');
       await this.#move('rolled-back'); return this.#view();
     } catch (error) {
@@ -267,17 +270,19 @@ export class ReviewCoordinator {
       await this.#move(this.#state === 'available' ? 'custody-broken' : 'review-failed', 'review-interrupted'); return this.#view();
     }
     if (this.#state !== 'activating') return this.#rollback('activation-interrupted');
-    try {
-      const proof = this.#d.nonceStore.recover(this.#decisionHash); const binding = boundRecovery(proof);
-      this.verifyConsumedDecision(binding);
-      await this.#d.versionStore.resumePendingActivation(binding);
-      await this.#integrity();
-      const runtime = await this.#d.runtime.refreshRecovered(binding);
-      const authorization = await this.#postRefresh(runtime, proof);
-      await this.#integrity(); await this.#d.versionStore.completeRecoveredActivation(binding, authorization, () => this.#move('activated'));
-      await this.#d.versionStore.verifyCompletedActivation(binding);
-      return this.#view();
-    } catch (error) { if (this.#halted || this.#state === 'activated') throw error; return this.#rollback('activation-interrupted'); }
+    return this.#d.runtime.withTransition(async owner => {
+      try {
+        const proof = this.#d.nonceStore.recover(this.#decisionHash); const binding = boundRecovery(proof);
+        this.verifyConsumedDecision(binding);
+        await this.#d.versionStore.resumePendingActivation(binding);
+        await this.#integrity();
+        const runtime = await owner.refreshRecovered(binding);
+        const authorization = await this.#postRefresh(runtime, proof, owner);
+        await this.#integrity(); await this.#d.versionStore.completeRecoveredActivation(binding, authorization, () => this.#move('activated'));
+        await this.#d.versionStore.verifyCompletedActivation(binding);
+        return this.#view();
+      } catch (error) { if (this.#halted || this.#state === 'activated') throw error; return this.#rollback('activation-interrupted', owner); }
+    });
   }); }
   handle(value) {
     if (!value || Object.getPrototypeOf(value) !== Object.prototype) return Promise.reject(new Error('Invalid lifecycle request'));

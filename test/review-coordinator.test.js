@@ -45,6 +45,7 @@ async function coordinatorFixture(t, options = {}) {
     collectEvidence: input => collectMacOSEvidence({ ...input, runner: runner().run }),
     ownershipPolicy: phase => osPolicy(phase),
     runtime: {
+      withTransition: operation => operation(deps.runtime),
       snapshot: () => ({ ...runtimeState }),
       refreshPending: async d => { effects.push('refresh'); const active = await versionStore.resolvePendingHost(d); runtimeState = { digest: active.digest, reviewId: active.reviewId, pid: 103, threadId: 'thread-1' }; return { ...runtimeState }; },
       refreshRecovered: async b => { effects.push('resume'); const active = await deps.versionStore.resolveRecoveredHost(b); runtimeState = { digest: active.digest, reviewId: active.reviewId, pid: 103, threadId: b.threadId }; return { ...runtimeState }; },

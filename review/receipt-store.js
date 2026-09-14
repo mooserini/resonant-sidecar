@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, lstatSync, renameSync, unlinkSync, rmdirSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants } from 'node:fs';
 import { mkdir, readdir, lstat, open, rename, rmdir } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -19,6 +20,9 @@ const FIXED_FAILURE = { reviewId: 'sanitization-failure', eventType: 'review-fai
 
 export class CustodyError extends Error {
   constructor(reason = 'history verification failed') { super(`Custody broken: ${reason}`); this.name = 'CustodyError'; }
+}
+export class CompletionCancelledError extends Error {
+  constructor() { super('Owning runtime cancelled activation commit'); this.name = 'CompletionCancelledError'; }
 }
 class LedgerBusyError extends Error {}
 
@@ -153,6 +157,7 @@ async function walk(directory, relative = '', sealed = false) {
 
 export class ReceiptStore {
   #root; #policy; #clock; #randomUUID; #rename; #immutable;
+  #commitScope = new AsyncLocalStorage();
   constructor({ root, policy = V1_POLICY, clock = () => new Date(), randomUUID: uuid = randomUUID, rename: renameAdapter = rename, immutable = immutableFlag } = {}) {
     if (typeof root !== 'string' || !path.isAbsolute(root) || path.basename(root) !== 'review-receipts' || path.normalize(root) !== root) throw new TypeError('An explicit project-local review-receipts root is required');
     if (sha256Json(policy) !== POLICY_HASH) throw new TypeError('Unsupported review policy snapshot');
@@ -260,6 +265,7 @@ export class ReceiptStore {
     });
   }
   async finalizeEvent(input) {
+    const commitGuard = this.#commitScope.getStore();
     return this.#locked(async () => {
       const chain = await this.#chain();
       if (chain.state !== 'intact') throw new CustodyError(chain.reason);
@@ -283,6 +289,7 @@ export class ReceiptStore {
       const receiptHash = sha256Bytes(files['receipt.json']);
       files['receipt.sha256'] = `${receiptHash}\n`;
       await ensureDirectory(path.join(this.#root, '.pending'));
+      const parents = [this.#root, path.join(this.#root, '.pending')].map(directory => ({ directory, metadata: lstatSync(directory) }));
       const pending = path.join(this.#root, '.pending', receiptId);
       await mkdir(pending, { mode: 0o700 });
       for (const [name, bytes] of Object.entries(files)) {
@@ -296,11 +303,38 @@ export class ReceiptStore {
       try {
         const headTemporary = path.join(this.#root, `.head-next-${receiptId}`);
         await writeExclusive(headTemporary, canonicalJson({ count: chain.count + 1, tailHash: receiptHash }));
-        await this.#rename(headTemporary, path.join(this.#root, '.custody-head'));
-        await syncDirectory(this.#root);
         const directory = path.join(this.#root, directoryName(receipt));
         if (await info(directory)) throw new CustodyError('receipt target already exists');
-        await this.#rename(pending, directory);
+        if (commitGuard) {
+          // The scope is supplied by VersionStore, not the finalizer adapter or
+          // browser. No asynchronous boundary separates live ownership from
+          // canonical publication: close either cancels first or follows commit.
+          if (commitGuard() !== true) {
+            for (const entry of parents) {
+              const current = lstatSync(entry.directory);
+              schema(current.isDirectory() && !current.isSymbolicLink() && current.dev === entry.metadata.dev && current.ino === entry.metadata.ino);
+            }
+            for (const entry of sealHandles) {
+              const current = lstatSync(path.join(pending, entry.name));
+              schema(!current.isSymbolicLink() && current.dev === entry.metadata.dev && current.ino === entry.metadata.ino);
+            }
+            // Remove only this unpublished, inode-checked preparation. Existing
+            // canonical receipts and their head have not changed.
+            for (const entry of [...sealHandles].reverse()) {
+              const target = path.join(pending, entry.name);
+              if (entry.isDirectory) rmdirSync(target); else unlinkSync(target);
+            }
+            unlinkSync(headTemporary);
+            await syncDirectory(path.join(this.#root, '.pending')); await syncDirectory(this.#root);
+            throw new CompletionCancelledError();
+          }
+          renameSync(headTemporary, path.join(this.#root, '.custody-head'));
+          renameSync(pending, directory);
+        } else {
+          await this.#rename(headTemporary, path.join(this.#root, '.custody-head'));
+          await syncDirectory(this.#root);
+          await this.#rename(pending, directory);
+        }
         await this.#readReceipt(directory, true);
         await sealHeldReceipt(directory, sealHandles);
         await this.#readReceipt(directory);
@@ -308,7 +342,7 @@ export class ReceiptStore {
         try { await this.#immutable(directory); } catch { /* Best effort; read-only modes and hash verification remain required. */ }
         result = await this.#readReceipt(directory);
       } catch (error) {
-        await this.#markBroken();
+        if (!(error instanceof CompletionCancelledError)) await this.#markBroken();
         throw error;
       } finally {
         await Promise.all(sealHandles.map(entry => entry.handle.close()));
@@ -318,5 +352,9 @@ export class ReceiptStore {
       if (rejected) throw new SanitizationError();
       return result;
     });
+  }
+  withCommitGuard(guard, operation) {
+    if (typeof guard !== 'function' || typeof operation !== 'function' || this.#commitScope.getStore()) throw new TypeError('Trusted completion scope required');
+    return this.#commitScope.run(guard, operation);
   }
 }

@@ -19,10 +19,10 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   const resume = resumeActivation === null ? null : snapshotRecoveryBinding(resumeActivation);
   if (resume) await store.resumePendingActivation(resume);
   else await store.recover();
-  let proxy; let lastChildPid; let stopped = false; let closePromise; let resolveClosed; let queued = 0;
+  let proxy; let lastChildPid; let stopped = false; let closePromise; let resolveClosed; let queued = 0; let lazyStartAllowed = true;
   let refreshing = null; let refreshed = null; let readyWait = null;
   let runtimeState = null; let sessionThreadId = resume?.threadId ?? null; let sessionRequested = resume !== null; let generation = 0;
-  const owned = new Set(); let transitions = Promise.resolve(); let transitionBusy = false;
+  const owned = new Set(); let transitions = Promise.resolve(); let transitionBusy = false; let leaseActive = false;
   const serialize = action => {
     const result = transitions.then(async () => {
       transitionBusy = true;
@@ -32,13 +32,14 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     return result;
   };
   const stopOwned = async () => {
+    lazyStartAllowed = false;
     ++generation;
     for (const child of owned) { await child.close(); owned.delete(child); }
     proxy = null; runtimeState = null;
   };
   const closed = new Promise(resolve => { resolveClosed = resolve; });
   const send = message => { if (!stopped) writeFrame(output, message); };
-  store.bindRuntimeGuard(expected => !stopped && !refreshing && !transitionBusy && owned.size === 1 && owned.has(proxy) && refreshed?.pid === proxy.pid && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId && (expected.pid === undefined || expected.pid === runtimeState.pid) && (expected.threadId === undefined || expected.threadId === runtimeState.threadId));
+  store.bindRuntimeGuard(expected => !stopped && !refreshing && (!transitionBusy || leaseActive) && owned.size === 1 && owned.has(proxy) && refreshed?.pid === proxy.pid && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId && (expected.pid === undefined || expected.pid === runtimeState.pid) && (expected.threadId === undefined || expected.threadId === runtimeState.threadId));
   const close = () => {
     if (closePromise) return closePromise;
     stopped = true; input.pause();
@@ -69,14 +70,15 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
       send(message);
     } });
     owned.add(proxy);
+    lazyStartAllowed = true;
     lastChildPid = proxy.pid;
     runtimeState = Object.freeze({ digest: active.digest, reviewId: active.reviewId, hostPath: active.hostPath, pid: proxy.pid, pgid: proxy.pid, threadId: null });
   };
-  const refresh = (decision, mode = 'pending') => {
+  const refresh = (decision, mode = 'pending', schedule = serialize, leased = false) => {
     decision = mode === 'previous' ? null : mode === 'recovered' ? snapshotRecoveryBinding(decision) : snapshotDecision(decision);
     if (stopped || refreshing) return Promise.reject(new Error('Runtime refresh unavailable'));
     refreshed = null;
-    const transition = serialize(async () => {
+    const transition = schedule(async () => {
       let timer;
       try {
         await stopOwned();
@@ -100,12 +102,30 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     // Recovery is queued only after this transition releases ownership, never
     // awaited from inside the same transition queue.
     const operation = transition.catch(async error => {
-      if (!stopped) await close();
+      if (!stopped && !leased) await close();
       throw error;
     }).finally(() => { refreshing = null; });
     refreshing = operation;
     return operation;
   };
+  // Only this scoped capability may run inside the reservation. Public runtime
+  // methods and conversation frames still queue; a retained lease is unusable.
+  const withTransition = operation => serialize(async () => {
+    if (stopped) throw new Error('Runtime transition unavailable');
+    let valid = true; leaseActive = true;
+    const run = action => {
+      if (!valid) return Promise.reject(new Error('Runtime transition released'));
+      return action();
+    };
+    const runtime = Object.freeze({
+      snapshot: () => { if (!valid) throw new Error('Runtime transition released'); return runtimeState; },
+      refreshPending: d => run(() => refresh(d, 'pending', run, true)),
+      refreshRecovered: b => run(() => refresh(b, 'recovered', run, true)),
+      stopCandidate: () => run(async () => { refreshed = null; await stopOwned(); }),
+      restartPrevious: () => run(() => refresh(null, 'previous', run, true)),
+    });
+    try { return await operation(runtime); } finally { valid = false; leaseActive = false; }
+  });
   let queue = Promise.resolve();
   let lifecyclePending = 0;
   const lifecycleFailure = error => send({ type: 'review.failed', state: error?.name === 'CustodyError' ? 'custody-broken' : 'review-failed' });
@@ -147,6 +167,10 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
         await serialize(async () => {
           if (stopped) return;
           if (!proxy) {
+            // After a runtime transition reaps its child, only a trusted
+            // refresh/restore may start another. A failed rollback must never
+            // turn ordinary traffic into authority to launch pending B.
+            if (!lazyStartAllowed) { lifecycleFailure(); return; }
             const active = await store.resolveActiveHost(); if (stopped) return;
             startProxy(active);
           }
@@ -159,7 +183,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   input.on('data', data); input.on('end', close); input.on('close', close); input.on('error', close);
   output.on('error', close); signals.on('SIGTERM', close); signals.on('SIGINT', close); signals.on('SIGHUP', close);
   return {
-    close, closed, refreshPending: decision => refresh(decision), refreshRecovered: binding => refresh(binding, 'recovered'),
+    close, closed, withTransition, refreshPending: decision => refresh(decision), refreshRecovered: binding => refresh(binding, 'recovered'),
     stopCandidate: () => serialize(async () => { refreshed = null; await stopOwned(); }),
     restartPrevious: () => refresh(null, 'previous'),
     completeActivation(decision) { return store.completeActivation(decision); },

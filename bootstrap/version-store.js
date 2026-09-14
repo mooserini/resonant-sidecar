@@ -365,7 +365,8 @@ export class VersionStore {
     if (this.#pending !== binding.nonceDigest || (recovered && canonicalJson(this.#recovered) !== canonicalJson(binding))) fail('Pending recovery not rehydrated');
     const state = await this.#recoveryBinding(binding);
     const witness = completionWitness(binding, authorization);
-    if (!this.#runtimeGuard({ ...state.candidate, decisionHash: state.decisionHash, pid: witness.runtime.pid, threadId: witness.runtime.threadId })) fail('Pending runtime refresh required before completion');
+    const ownsRuntime = () => this.#runtimeGuard({ ...state.candidate, decisionHash: state.decisionHash, pid: witness.runtime.pid, threadId: witness.runtime.threadId }) === true;
+    if (!ownsRuntime()) fail('Pending runtime refresh required before completion');
     const file = path.join(this.#root, 'completions', `${state.decisionHash}.json`);
     if (exists(file)) {
       if (canonicalJson(readCanonical(file, this.#device)) !== canonicalJson(witness)) fail('Completion witness changed');
@@ -373,7 +374,11 @@ export class VersionStore {
     // The witness is durable before the canonical event. An interrupted append
     // leaves pending state; a committed event is idempotently reconciled by recover.
     let receipt = await this.#committedCompletion(state);
-    if (!receipt) { await finalizeActivation(); receipt = await this.#committedCompletion(state); }
+    if (!receipt) {
+      if (!ownsRuntime()) fail('Pending runtime refresh cancelled before completion');
+      await this.#receipts.withCommitGuard(ownsRuntime, finalizeActivation);
+      receipt = await this.#committedCompletion(state);
+    }
     if (!receipt) fail('Canonical activation receipt required');
     state.phase = 'complete'; this.#save(state); this.#pending = null; this.#recovered = null;
     return { phase: 'complete', receiptHash: receipt.receiptHash };
