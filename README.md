@@ -37,30 +37,51 @@ npm run smoke:real
 
 The deterministic real smoke test starts one native host, creates a Codex thread, completes a turn, stops the host, starts a second host, resumes the same thread, and completes two context-dependent turns. It prints thread/turn IDs and SHA-256 reply receipts rather than a transcript.
 
-## Attach to Chrome Dev
+## Current V1 attachment
 
 1. Open `chrome://extensions` in the intended local Chrome Dev profile.
 2. Enable Developer mode and choose **Load unpacked**.
 3. Select the absolute `extension/` directory in this checkout.
 4. Copy the 32-character extension ID Chrome displays.
-5. Preview the exact native-host registration without changing files:
+5. Preview the original V1 native-host registration without changing files:
 
    ```sh
    node scripts/install-macos.js --extension-id EXTENSION_ID
    ```
 
-6. Inspect the one allowed origin, then install it:
+6. Do not run a migration command yet. The original V1 stays attached until the
+   Task 12 human checkpoint shows the exact plan and Tom approves that exact
+   plan.
 
-   ```sh
-   node scripts/install-macos.js --install --extension-id EXTENSION_ID
-   ```
+The current installer is now migration-oriented. With only `--extension-id`, it
+performs a read-only inspection of committed `HEAD` and the current V1 launcher
+and manifest, then prints exact paths, SHA-256 digests, file modes, the one
+allowed origin, and the proposed install hash. It does not write staging data,
+registration, receipts, or runtime state.
 
-7. Click the extension action to open its side panel.
+A preparation transaction requires all three explicit arguments from the
+reviewed plan:
 
-The installer writes only:
+```sh
+node scripts/install-macos.js \
+  --migrate \
+  --extension-id EXTENSION_ID \
+  --expected-current-hash REVIEWED_SHA256
+```
 
-- `~/Library/Application Support/Resonant Sidecar/native-host`
-- `~/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json`
+Do not run that command before the Task 12 checkpoint. The preparation pins the
+complete V1 payload in the project-local version store, installs a separate
+closed trusted-bootstrap graph, creates a stable unpacked-extension directory,
+and preserves the old launcher and manifest read-only. It does **not** change
+the live Chrome Dev native-host registration. An unpacked extension loaded from
+a new path is not assumed to retain its ID: Task 12 must load the stable path,
+record the ID Chrome Dev actually displays, and stop unless it exactly matches
+the reviewed expected ID. Only a later, separately reviewed registration step
+may point Chrome Dev at the pinned bootstrap. Nothing targets Chrome Stable or
+adds a listener, capability, or Chrome permission.
+
+See [docs/migration-runbook.md](docs/migration-runbook.md) for the exact human
+boundary, recovery procedure, process tree, and receipt locations.
 
 The native-host manifest authorizes exactly `chrome-extension://EXTENSION_ID/`. See Chrome's [Native Messaging documentation](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and OpenAI's [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server) for the underlying protocols.
 
