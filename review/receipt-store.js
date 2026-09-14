@@ -1,0 +1,269 @@
+import { readFileSync } from 'node:fs';
+import { constants } from 'node:fs';
+import { mkdir, readdir, lstat, open, rename, chmod, rmdir } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { canonicalJson, sha256Bytes, sha256Json } from './canonical-json.js';
+import { sanitizeEvidence, SanitizationError } from './redaction.js';
+
+const V1_POLICY = JSON.parse(readFileSync(new URL('../policy/review-policy.v1.json', import.meta.url), 'utf8'));
+const POLICY_HASH = sha256Json(V1_POLICY);
+const SHA256 = /^[a-f0-9]{64}$/;
+const ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/;
+const PROJECT_FILES = { activeVersion: 'active-version.json', candidateVersion: 'candidate-version.json', sourceHashes: 'source-hashes.json', dependencyLock: 'dependency-lock.json', testResults: 'test-results.json' };
+const PHASES = ['before', 'verification', 'after'];
+const INPUT_FIELDS = ['reviewId', 'eventType', 'outcome', 'verifierIdentities', 'activeBundleDigest', 'candidateBundleDigest', 'projectEvidence', 'osEvidence', 'attestation', 'humanDecisionRef'];
+const FIXED_FAILURE = { reviewId: 'sanitization-failure', eventType: 'review-failed', outcome: 'sanitization-failed', verifierIdentities: [{ name: 'sanitizer', version: '1' }], activeBundleDigest: null, candidateBundleDigest: null, projectEvidence: { activeVersion: {}, candidateVersion: {}, sourceHashes: {}, dependencyLock: {}, testResults: {} }, osEvidence: { before: {}, verification: {}, after: {} } };
+
+export class CustodyError extends Error {
+  constructor(reason = 'history verification failed') { super(`Custody broken: ${reason}`); this.name = 'CustodyError'; }
+}
+class LedgerBusyError extends Error {}
+
+function schema(condition) { if (!condition) throw new TypeError('Receipt schema validation failed'); }
+function plain(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value)); }
+function exact(value, keys) { schema(plain(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',')); }
+function validDigest(value) { return value === null || (typeof value === 'string' && SHA256.test(value)); }
+function assertIdentity(value) {
+  schema(Array.isArray(value) && value.length <= 20);
+  for (const identity of value) {
+    exact(identity, ['name', 'version']);
+    schema(typeof identity.name === 'string' && ID.test(identity.name));
+    schema(typeof identity.version === 'string' && /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,99}$/.test(identity.version));
+  }
+}
+function assertAttestation(value) {
+  if (value === null) return;
+  exact(value, ['schemaVersion', 'verdict', 'summary', 'behavioralDifferences', 'dependencyChanges', 'unexplainedFiles', 'policyConcerns']);
+  schema(value.schemaVersion === 1 && ['favorable', 'unfavorable'].includes(value.verdict));
+  schema(typeof value.summary === 'string' && value.summary.length <= 2000);
+  for (const field of ['behavioralDifferences', 'dependencyChanges', 'unexplainedFiles', 'policyConcerns']) schema(Array.isArray(value[field]) && value[field].length <= 100 && value[field].every(item => typeof item === 'string' && item.length <= 1000));
+}
+function assertCore(value, policy) {
+  schema(typeof value.reviewId === 'string' && ID.test(value.reviewId));
+  schema(typeof value.eventType === 'string' && Object.hasOwn(policy.stateTransitions, value.eventType));
+  schema(typeof value.outcome === 'string' && [...Object.keys(policy.stateTransitions), 'passed', 'failed', 'sanitization-failed'].includes(value.outcome));
+  schema(validDigest(value.activeBundleDigest) && validDigest(value.candidateBundleDigest));
+  assertIdentity(value.verifierIdentities);
+  if (Object.hasOwn(value, 'humanDecisionRef')) schema(typeof value.humanDecisionRef === 'string' && SHA256.test(value.humanDecisionRef));
+}
+function assertInput(value, policy) {
+  schema(plain(value) && Object.keys(value).every(key => INPUT_FIELDS.includes(key)));
+  assertCore(value, policy);
+  exact(value.projectEvidence, Object.keys(PROJECT_FILES));
+  exact(value.osEvidence, PHASES);
+  for (const item of [...Object.values(value.projectEvidence), ...Object.values(value.osEvidence)]) schema(plain(item));
+  assertAttestation(value.attestation ?? null);
+}
+function assertReceipt(value, policy) {
+  exact(value, policy.receiptFields.filter(key => key !== 'humanDecisionRef' || Object.hasOwn(value, key)));
+  assertCore(value, policy);
+  schema(typeof value.receiptId === 'string' && ID.test(value.receiptId));
+  schema(validDigest(value.previousReceiptHash));
+  for (const field of ['projectEvidenceHash', 'osEvidenceHash', 'policySnapshotHash']) schema(typeof value[field] === 'string' && SHA256.test(value[field]));
+  schema(typeof value.createdAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.createdAt) && new Date(value.createdAt).toISOString() === value.createdAt);
+}
+function directoryName(receipt) { return `${receipt.createdAt.replaceAll(':', '-')}_${receipt.reviewId}`; }
+function report(value) { return `# Local review receipt\n\nReview: ${value.reviewId}\n\nEvent: ${value.eventType}\n\nOutcome: ${value.outcome}\n\nCreated: ${value.createdAt}\n`; }
+function hashFiles(files, prefix) {
+  const hashes = {};
+  for (const [name, bytes] of Object.entries(files)) if (prefix === 'project' ? name.startsWith('project/') || name === 'report.md' || name === 'attestation.json' : name.startsWith('os/')) hashes[name] = sha256Bytes(bytes);
+  return sha256Json(hashes);
+}
+async function info(file) { try { return await lstat(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } }
+async function readRegular(file) {
+  const metadata = await lstat(file);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > 4 * 1024 * 1024) throw new CustodyError('nonregular evidence');
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try { return await handle.readFile('utf8'); } finally { await handle.close(); }
+}
+async function writeExclusive(file, bytes) {
+  const handle = await open(file, 'wx', 0o600);
+  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+}
+async function syncDirectory(directory) { const handle = await open(directory, 'r'); try { await handle.sync(); } finally { await handle.close(); } }
+async function ensureDirectory(directory) {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const metadata = await lstat(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new CustodyError('invalid directory');
+}
+async function immutableFlag(directory) {
+  if (process.platform === 'darwin') await promisify(execFile)('/usr/bin/chflags', ['-R', 'uchg', directory], { timeout: 10000 });
+}
+async function walk(directory, relative = '', sealed = false) {
+  if (!['', 'project', 'os', ...PHASES.map(phase => `os/${phase}`)].includes(relative)) throw new CustodyError('unexpected evidence directory');
+  const files = [];
+  const metadata = await lstat(path.join(directory, relative));
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new CustodyError('nonregular evidence directory');
+  if (sealed) schema((metadata.mode & 0o777) === 0o555);
+  for (const entry of await readdir(path.join(directory, relative), { withFileTypes: true })) {
+    const name = relative ? `${relative}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) files.push(...await walk(directory, name, sealed));
+    else if (entry.isFile()) files.push(name);
+    else throw new CustodyError('nonregular evidence');
+  }
+  return files;
+}
+
+export class ReceiptStore {
+  #root; #policy; #clock; #randomUUID; #rename; #immutable;
+  constructor({ root, policy = V1_POLICY, clock = () => new Date(), randomUUID: uuid = randomUUID, rename: renameAdapter = rename, immutable = immutableFlag } = {}) {
+    if (typeof root !== 'string' || !path.isAbsolute(root) || path.basename(root) !== 'review-receipts' || path.normalize(root) !== root) throw new TypeError('An explicit project-local review-receipts root is required');
+    if (sha256Json(policy) !== POLICY_HASH) throw new TypeError('Unsupported review policy snapshot');
+    this.#root = root; this.#policy = JSON.parse(canonicalJson(policy)); this.#clock = clock; this.#randomUUID = uuid; this.#rename = renameAdapter; this.#immutable = immutable;
+  }
+  async #markBroken() {
+    // Only a fixed marker is retained; never error text or rejected evidence.
+    try { await writeExclusive(path.join(this.#root, '.custody-broken'), 'custody-broken\n'); } catch { /* Existing marker or unavailable storage: still refuse. */ }
+  }
+  async #readReceipt(directory, pending = false) {
+    const expected = ['report.md', 'receipt.json', 'attestation.json', 'policy-snapshot.json', 'receipt.sha256', ...Object.values(PROJECT_FILES).map(name => `project/${name}`), ...PHASES.map(phase => `os/${phase}/evidence.json`)];
+    const names = await walk(directory, '', !pending);
+    schema(names.sort().join(',') === expected.sort().join(','));
+    const files = {};
+    for (const name of names) {
+      if (!pending) schema(((await lstat(path.join(directory, name))).mode & 0o777) === 0o444);
+      files[name] = await readRegular(path.join(directory, name));
+    }
+    for (const name of names.filter(name => name.endsWith('.json'))) {
+      const parsed = JSON.parse(files[name]);
+      schema(canonicalJson(parsed) === files[name]);
+      if (name !== 'policy-snapshot.json' && parsed !== null) sanitizeEvidence(parsed, this.#policy);
+    }
+    const receipt = JSON.parse(files['receipt.json']);
+    assertReceipt(receipt, this.#policy);
+    schema(pending || directoryName(receipt) === path.basename(directory));
+    assertAttestation(JSON.parse(files['attestation.json']));
+    schema(files['report.md'] === report(receipt));
+    schema(sha256Json(JSON.parse(files['policy-snapshot.json'])) === POLICY_HASH);
+    schema(receipt.policySnapshotHash === sha256Bytes(files['policy-snapshot.json']));
+    schema(receipt.projectEvidenceHash === hashFiles(files, 'project'));
+    schema(receipt.osEvidenceHash === hashFiles(files, 'os'));
+    const receiptHash = sha256Bytes(files['receipt.json']);
+    schema(files['receipt.sha256'] === `${receiptHash}\n`);
+    return { ...receipt, receiptHash, directory };
+  }
+  async #chain() {
+    const rootInfo = await info(this.#root);
+    if (!rootInfo) return { state: 'intact', count: 0, tailHash: null, receipts: [] };
+    try {
+      schema(rootInfo.isDirectory() && !rootInfo.isSymbolicLink());
+      if (await info(path.join(this.#root, '.custody-broken'))) throw new CustodyError('recorded history break');
+      const ignored = new Set(['README.md', 'runtime-comparisons', 'repository-comparisons', '.pending', '.custody-head', '.append-lock', 'latest-failure.json']);
+      const candidates = [];
+      for (const entry of await readdir(this.#root, { withFileTypes: true })) {
+        if (ignored.has(entry.name) || entry.name.startsWith('.failure-next-')) continue;
+        if (entry.name.startsWith('.head-next-')) throw new CustodyError('interrupted checkpoint');
+        schema(entry.isDirectory() && /^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d\.\d{3}Z_[A-Za-z0-9-]+$/.test(entry.name));
+        candidates.push(await this.#readReceipt(path.join(this.#root, entry.name)));
+      }
+      const pendingInfo = await info(path.join(this.#root, '.pending'));
+      if (pendingInfo) {
+        schema(pendingInfo.isDirectory() && !pendingInfo.isSymbolicLink());
+        schema((await readdir(path.join(this.#root, '.pending'))).length === 0);
+      }
+      const receipts = [];
+      let tailHash = null;
+      const ids = new Set();
+      while (receipts.length < candidates.length) {
+        const next = candidates.filter(item => item.previousReceiptHash === tailHash);
+        schema(next.length === 1 && !ids.has(next[0].receiptId));
+        ids.add(next[0].receiptId); receipts.push(next[0]); tailHash = next[0].receiptHash;
+      }
+      const headInfo = await info(path.join(this.#root, '.custody-head'));
+      if (headInfo) {
+        const head = JSON.parse(await readRegular(path.join(this.#root, '.custody-head')));
+        exact(head, ['count', 'tailHash']);
+        schema(head.count === receipts.length && head.tailHash === tailHash);
+      } else schema(receipts.length === 0 && !pendingInfo);
+      return { state: 'intact', count: receipts.length, tailHash, receipts };
+    } catch {
+      if (rootInfo.isDirectory() && !rootInfo.isSymbolicLink()) await this.#markBroken();
+      return { state: 'custody-broken', reason: 'Canonical history or custody witness is missing, changed, or incomplete' };
+    }
+  }
+  async verifyChain() {
+    const metadata = await info(this.#root);
+    if (!metadata || !metadata.isDirectory() || metadata.isSymbolicLink()) return this.#chain();
+    // Use the same lock as writers: a check-then-read can observe half a commit.
+    try { return await this.#locked(() => this.#chain()); }
+    catch (error) {
+      if (error instanceof LedgerBusyError) return { state: 'busy', reason: 'An append is active or interrupted' };
+      throw error;
+    }
+  }
+  async #pointer(chain) {
+    const failure = chain.receipts.findLast(item => ['review-failed', 'activation-failed'].includes(item.eventType));
+    const temporary = path.join(this.#root, `.failure-next-${this.#safeUUID()}`);
+    await writeExclusive(temporary, canonicalJson(failure ? { receiptHash: failure.receiptHash, directory: path.basename(failure.directory) } : null));
+    await this.#rename(temporary, path.join(this.#root, 'latest-failure.json'));
+    return failure ? path.join(failure.directory, 'report.md') : null;
+  }
+  #safeUUID() { const id = this.#randomUUID(); schema(typeof id === 'string' && ID.test(id)); return id; }
+  async #locked(operation) {
+    await ensureDirectory(this.#root);
+    const lock = path.join(this.#root, '.append-lock');
+    try { await mkdir(lock, { mode: 0o700 }); } catch (error) { if (error.code === 'EEXIST') throw new LedgerBusyError('Custody ledger is busy or has an interrupted append'); throw error; }
+    try { return await operation(); } finally { await rmdir(lock); }
+  }
+  async resolveLatestFailure() {
+    return this.#locked(async () => {
+      const chain = await this.#chain();
+      if (chain.state !== 'intact') throw new CustodyError(chain.reason);
+      return this.#pointer(chain);
+    });
+  }
+  async finalizeEvent(input) {
+    return this.#locked(async () => {
+      const chain = await this.#chain();
+      if (chain.state !== 'intact') throw new CustodyError(chain.reason);
+      let sanitized; let rejected = false;
+      try { sanitized = sanitizeEvidence(input, this.#policy); }
+      catch (error) { if (!(error instanceof SanitizationError)) throw error; sanitized = structuredClone(FIXED_FAILURE); rejected = true; }
+      assertInput(sanitized, this.#policy);
+      const receiptId = this.#safeUUID();
+      if (chain.receipts.some(receipt => receipt.receiptId === receiptId)) throw new TypeError('Duplicate receipt ID');
+      const observed = new Date(this.#clock()).getTime();
+      schema(Number.isFinite(observed));
+      const lastTime = chain.receipts.length ? Date.parse(chain.receipts.at(-1).createdAt) : -Infinity;
+      const createdAt = new Date(Math.max(observed, lastTime + 1)).toISOString();
+      const receipt = { receiptId, reviewId: sanitized.reviewId, eventType: sanitized.eventType, outcome: sanitized.outcome, previousReceiptHash: chain.tailHash, projectEvidenceHash: '', osEvidenceHash: '', policySnapshotHash: POLICY_HASH, verifierIdentities: sanitized.verifierIdentities, activeBundleDigest: sanitized.activeBundleDigest, candidateBundleDigest: sanitized.candidateBundleDigest, ...(sanitized.humanDecisionRef ? { humanDecisionRef: sanitized.humanDecisionRef } : {}), createdAt };
+      const files = { 'report.md': report(receipt), 'attestation.json': canonicalJson(sanitized.attestation ?? null), 'policy-snapshot.json': canonicalJson(this.#policy) };
+      for (const [key, name] of Object.entries(PROJECT_FILES)) files[`project/${name}`] = canonicalJson(sanitized.projectEvidence[key]);
+      for (const phase of PHASES) files[`os/${phase}/evidence.json`] = canonicalJson(sanitized.osEvidence[phase]);
+      receipt.projectEvidenceHash = hashFiles(files, 'project'); receipt.osEvidenceHash = hashFiles(files, 'os');
+      assertReceipt(receipt, this.#policy);
+      files['receipt.json'] = canonicalJson(receipt);
+      const receiptHash = sha256Bytes(files['receipt.json']);
+      files['receipt.sha256'] = `${receiptHash}\n`;
+      await ensureDirectory(path.join(this.#root, '.pending'));
+      const pending = path.join(this.#root, '.pending', receiptId);
+      await mkdir(pending, { mode: 0o700 });
+      for (const [name, bytes] of Object.entries(files)) {
+        await ensureDirectory(path.dirname(path.join(pending, name)));
+        await writeExclusive(path.join(pending, name), bytes);
+      }
+      for (const name of [...PHASES.map(phase => `os/${phase}`), 'os', 'project', '']) await syncDirectory(path.join(pending, name));
+      await this.#readReceipt(pending, true);
+      const headTemporary = path.join(this.#root, `.head-next-${receiptId}`);
+      await writeExclusive(headTemporary, canonicalJson({ count: chain.count + 1, tailHash: receiptHash }));
+      await this.#rename(headTemporary, path.join(this.#root, '.custody-head'));
+      await syncDirectory(this.#root);
+      const directory = path.join(this.#root, directoryName(receipt));
+      if (await info(directory)) throw new CustodyError('receipt target already exists');
+      await this.#rename(pending, directory);
+      // Only this newly finalized receipt is touched; prior evidence is never changed.
+      for (const name of Object.keys(files)) await chmod(path.join(directory, name), 0o444);
+      for (const name of [...PHASES.map(phase => `os/${phase}`), 'os', 'project', '']) await chmod(path.join(directory, name), 0o555);
+      await syncDirectory(this.#root);
+      try { await this.#immutable(directory); } catch { /* Best effort; read-only modes and hash verification remain required. */ }
+      const result = { ...receipt, receiptHash, directory };
+      // This convenience pointer is rebuildable; its failure cannot undo custody.
+      try { await this.#pointer({ receipts: [...chain.receipts, result] }); } catch { /* Resolve can rebuild it later. */ }
+      if (rejected) throw new SanitizationError();
+      return result;
+    });
+  }
+}
