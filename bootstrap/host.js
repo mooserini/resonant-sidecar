@@ -162,8 +162,9 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     queue = queue.then(async () => {
       if (stopped) return;
       {
-        if (refreshing) await refreshing;
-        if (stopped) return;
+        // Wait for the whole owning transition, including recovery. A rejected
+        // candidate refresh is a lifecycle result, not this frame's transport
+        // failure. Dispatch errors below still take the global failure path.
         await serialize(async () => {
           if (stopped) return;
           if (!proxy) {

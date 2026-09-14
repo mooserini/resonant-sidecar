@@ -23,7 +23,7 @@ async function liveFixture(t) {
   const seed = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
   await seed.installVersion(first); await seed.activate(decisionFor(first)); await seed.completeActivation(decisionFor(first));
   const receipts = new ReceiptStore({ root: path.join(f.projectRoot, 'review-receipts'), immutable: async () => {} });
-  let coordinator; let bootstrap; let failAfter = false;
+  let coordinator; let bootstrap; let failAfter = false; let rejectSend = false;
   const store = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: d => coordinator.consumeDecision(d), verifyConsumedDecision: b => coordinator.verifyConsumedDecision(b) });
   const runtime = {
     snapshot: () => bootstrap.runtimeState,
@@ -42,12 +42,12 @@ async function liveFixture(t) {
   const input = new PassThrough(); const starts = []; const turns = []; const reaped = [];
   bootstrap = await runBootstrap({ store, coordinator, input, output: new PassThrough(), signals: new EventEmitter(), proxyFactory: ({ active, onMessage }) => {
     starts.push(active.reviewId);
-    return { pid: 103, send: m => { if (m.type === 'session.open') queueMicrotask(() => onMessage({ type: 'session.ready', threadId: 'thread-kept' })); else turns.push({ reviewId: active.reviewId, type: m.type }); }, close: async () => { reaped.push(active.reviewId); } };
+    return { pid: 103, send: m => { if (rejectSend) throw new Error('proxy transport rejected frame'); if (m.type === 'session.open') queueMicrotask(() => onMessage({ type: 'session.ready', threadId: 'thread-kept' })); else turns.push({ reviewId: active.reviewId, type: m.type }); }, close: async () => { reaped.push(active.reviewId); } };
   } });
   input.write(encodeNativeMessage({ type: 'session.open', threadId: 'thread-kept' }));
   while (!bootstrap.runtimeState?.threadId) await new Promise(r => setTimeout(r, 5));
   return { ...f, first, next, receipts, store, coordinator, bootstrap, input, starts, turns, reaped, deps,
-    failAfter: () => { failAfter = true; }, events: async () => (await receipts.verifyChain()).receipts?.map(r => r.eventType),
+    failAfter: () => { failAfter = true; }, rejectSend: () => { rejectSend = true; }, events: async () => (await receipts.verifyChain()).receipts?.map(r => r.eventType),
   };
 }
 
@@ -165,4 +165,37 @@ test('failed rollback reservation cannot fall back to lazily restarting pending 
     assert.deepEqual(f.starts, ['first', 'next']);
     assert.deepEqual(f.turns, []);
   } finally { f.store.rollback = rollback; f.store.recover = recover; await f.bootstrap.close(); }
+});
+
+for (const type of ['turn.start', 'turn.interrupt']) test(`queued ${type} survives candidate resolution failure and reaches restored A`, { timeout: 15000 }, async t => {
+  const f = await liveFixture(t); const e = await f.coordinator.startReview();
+  let entered; let rejectResolution;
+  const resolving = new Promise(r => { entered = r; });
+  f.store.resolvePendingHost = () => { entered(); return new Promise((resolve, reject) => { rejectResolution = reject; }); };
+  try {
+    const accepting = f.coordinator.acceptReview(e.decision); await resolving;
+    f.input.write(encodeNativeMessage(type === 'turn.start' ? { type, text: 'queued during candidate resolution' } : { type }));
+    await new Promise(r => setTimeout(r, 50));
+    assert.deepEqual(f.turns, []);
+    rejectResolution(new Error('candidate resolution failed'));
+    assert.equal((await accepting).state, 'rolled-back');
+    await new Promise(r => setTimeout(r, 50));
+    assert.deepEqual(f.starts, ['first', 'first']);
+    assert.equal(f.bootstrap.runtimeState?.digest, f.first.manifest.bundleDigest);
+    assert.deepEqual(f.turns, [{ reviewId: 'first', type }]);
+    assert.deepEqual((await f.events()).slice(-3), ['activation-failed', 'rolling-back', 'rolled-back']);
+    f.input.write(encodeNativeMessage({ type: 'turn.start', text: 'A remains usable' }));
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(f.turns.length, 2);
+  } finally { await f.bootstrap.close(); }
+});
+
+for (const failure of ['proxy-send', 'framing']) test(`actual ${failure} failure still closes and reaps the active proxy`, { timeout: 15000 }, async t => {
+  const f = await liveFixture(t);
+  if (failure === 'proxy-send') { f.rejectSend(); f.input.write(encodeNativeMessage({ type: 'turn.interrupt' })); }
+  else f.input.write(Buffer.from([255, 255, 255, 255]));
+  await f.bootstrap.closed;
+  assert.equal(f.bootstrap.runtimeState, null);
+  assert.deepEqual(f.reaped, ['first']);
+  assert.deepEqual(f.turns, []);
 });
