@@ -248,3 +248,32 @@ test('rejects executable mutation after its own final ps check but before collec
   } });
   await assert.rejects(collectMacOSEvidence({ ...input, runner: fixture.run }), /evidence/);
 });
+
+for (const pseudo of ['txt', 'mem']) {
+  test(`accepts distinct repeated ${pseudo} mappings in synthetic NUL lsof output`, async () => {
+    const stdout = `${lsof.replaceAll('\n', '\0\n')}p103\0\nf${pseudo}\0tREG\0n/usr/lib/first.dylib\0\nf${pseudo}\0tREG\0n/Users/example/private-second.dylib\0\nfrtd\0tDIR\0n/\0\n`;
+    const evidence = await collectMacOSEvidence({ ...policy(), runner: runner({ '/usr/sbin/lsof': () => ({ exitCode: 0, stderr: '', stdout }) }).run });
+    assert.equal(evidence.passed, true);
+    assert.deepEqual(evidence.processes[2].listeners, []);
+    assert.deepEqual(evidence.processes[2].descriptors, [{ fd: 0, type: 'PIPE' }]);
+    assert.equal(JSON.stringify(evidence).includes('dylib'), false);
+  });
+}
+
+for (const secondFd of ['17', '17r']) {
+  test(`rejects conflicting numbered lsof records 17 and ${secondFd}`, async () => {
+    const stdout = `${lsof.replaceAll('\n', '\0\n')}p103\0\nf17\0tREG\0n/private/first\0\nf${secondFd}\0tREG\0n/private/second\0\n`;
+    await assert.rejects(collectMacOSEvidence({ ...policy(), runner: runner({ '/usr/sbin/lsof': () => ({ exitCode: 0, stderr: '', stdout }) }).run }), /evidence/);
+  });
+}
+
+test('repeatable pseudo labels cannot hide uncertain listener evidence or duplicate cwd', async () => {
+  for (const fields of [
+    'ftxt\0tIPv4\0PTCP\0n127.0.0.1:5000\0TST=LISTEN\0\n',
+    'fmem\0tIPv4\0PTCP\0n127.0.0.1:5000\0TST=LIST\0\n',
+    'fcwd\0tDIR\0n/private/other\0\n',
+  ]) {
+    const stdout = `${lsof.replaceAll('\n', '\0\n')}p103\0\n${fields}`;
+    await assert.rejects(collectMacOSEvidence({ ...policy(), runner: runner({ '/usr/sbin/lsof': () => ({ exitCode: 0, stderr: '', stdout }) }).run }), /evidence/);
+  }
+});

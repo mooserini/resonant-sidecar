@@ -57,7 +57,13 @@ function parseDescriptors(stdout, pid, role, cdpPorts) {
     if (kind === 'p') { relevant = value === String(pid); current = undefined; }
     else if (kind === 'f') {
       current = relevant ? { fd: value } : undefined;
-      if (current) { if (seen.has(value)) throw failure(); seen.add(value); records.push(current); }
+      if (current) {
+        // txt/mem label mapped files and may repeat. Only numbered descriptors
+        // and the process's working/root directories have singleton identities.
+        const identity = /^\d+[rwu]?$/.test(value) ? `fd:${Number.parseInt(value, 10)}` : ['cwd', 'rtd'].includes(value) ? value : null;
+        if (identity !== null) { if (seen.has(identity)) throw failure(); seen.add(identity); }
+        records.push(current);
+      }
     } else if (current && ['t', 'n', 'P'].includes(kind)) assign(kind, value);
     else if (current && kind === 'T') {
       if (!/^[A-Z]{2}=.+$/.test(value)) throw failure();
