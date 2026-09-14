@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rm,
@@ -177,6 +179,29 @@ async function readCommit(git, repoRoot) {
 }
 
 async function assertClean(git, repoRoot, files) {
+  let indexText;
+  try {
+    indexText = UTF8.decode(await gitRun(git, repoRoot, [
+      'ls-files',
+      '-v',
+      '-z',
+      '--',
+      ...files,
+    ]));
+  } catch {
+    throw sourceError('git-inspection-failed');
+  }
+  const indexRecords = indexText.length === 0 ? [] : indexText.split('\0');
+  if (indexRecords.at(-1) === '') indexRecords.pop();
+  const seen = new Set();
+  for (const record of indexRecords) {
+    const match = /^([^ ]) (.+)$/u.exec(record);
+    if (!match || !files.includes(match[2]) || seen.has(match[2])) {
+      throw sourceError('candidate-tree-invalid');
+    }
+    seen.add(match[2]);
+    if (match[1] !== 'H') throw sourceError('bundle-inputs-dirty');
+  }
   const status = await gitRun(git, repoRoot, [
     'status',
     '--porcelain=v1',
@@ -304,6 +329,42 @@ async function prepareQuarantine(root, quarantineRoot, reviewRoot) {
   }
 }
 
+async function captureDirectoryCustody(directories) {
+  const entries = [];
+  try {
+    for (const directory of directories) {
+      const metadata = await lstat(directory);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw sourceError('quarantine-custody-changed');
+      const handle = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+      const opened = await handle.stat();
+      if (!opened.isDirectory() || opened.dev !== metadata.dev || opened.ino !== metadata.ino) {
+        await handle.close();
+        throw sourceError('quarantine-custody-changed');
+      }
+      entries.push({ directory, handle, dev: metadata.dev, ino: metadata.ino });
+    }
+    return entries;
+  } catch (error) {
+    await Promise.all(entries.map(entry => entry.handle.close()));
+    throw error;
+  }
+}
+
+async function assertDirectoryCustody(entries) {
+  for (const entry of entries) {
+    const [current, held] = await Promise.all([lstat(entry.directory), entry.handle.stat()]);
+    if (current.isSymbolicLink()
+        || !current.isDirectory()
+        || !held.isDirectory()
+        || current.dev !== entry.dev
+        || current.ino !== entry.ino
+        || held.dev !== entry.dev
+        || held.ino !== entry.ino) {
+      throw sourceError('quarantine-custody-changed');
+    }
+  }
+}
+
 async function writeSnapshot(bundleRoot, candidate) {
   await mkdir(bundleRoot, { mode: 0o700 });
   for (const filePath of candidate.files) {
@@ -348,13 +409,14 @@ async function rereadSnapshot(bundleRoot, candidate) {
   return snapshot;
 }
 
-async function makeOwnedTreeWritable(target) {
+async function makeOwnedTreeWritable(target, custody) {
+  await assertDirectoryCustody(custody);
   const info = await lstat(target).catch(() => null);
   if (!info || info.isSymbolicLink()) return;
   if (info.isDirectory()) {
     await chmod(target, 0o700);
     for (const entry of await readdir(target)) {
-      await makeOwnedTreeWritable(path.join(target, entry));
+      await makeOwnedTreeWritable(path.join(target, entry), custody);
     }
   } else {
     await chmod(target, 0o600);
@@ -365,9 +427,16 @@ export async function stageLocalCandidate({ repoRoot, reviewId, quarantineRoot, 
   const quarantine = await validateQuarantine(repoRoot, quarantineRoot, reviewId);
   const candidate = await loadCandidate({ repoRoot, policy, git });
   let created = false;
+  let custody = null;
   try {
     await prepareQuarantine(candidate.root, quarantine.expected, quarantine.reviewRoot);
     created = true;
+    custody = await captureDirectoryCustody([
+      candidate.root,
+      path.join(candidate.root, 'runtime'),
+      quarantine.expected,
+      quarantine.reviewRoot,
+    ]);
     const bundleRoot = path.join(quarantine.reviewRoot, 'bundle');
     const manifestPath = path.join(quarantine.reviewRoot, 'staging-manifest.json');
     await writeSnapshot(bundleRoot, candidate);
@@ -414,10 +483,20 @@ export async function stageLocalCandidate({ repoRoot, reviewId, quarantineRoot, 
 
     return Object.freeze({ bundleRoot, manifestPath, manifest: sealedManifest });
   } catch (error) {
+    let failure = error?.code ? error : sourceError('staging-failed');
     if (created) {
-      await makeOwnedTreeWritable(quarantine.reviewRoot).catch(() => {});
-      await rm(quarantine.reviewRoot, { recursive: true, force: true }).catch(() => {});
+      try {
+        if (!custody) throw sourceError('quarantine-custody-changed');
+        await assertDirectoryCustody(custody);
+        await makeOwnedTreeWritable(quarantine.reviewRoot, custody);
+        await assertDirectoryCustody(custody);
+        await rm(quarantine.reviewRoot, { recursive: true, force: true });
+      } catch {
+        failure = sourceError('quarantine-custody-changed');
+      }
     }
-    throw error?.code ? error : sourceError('staging-failed');
+    throw failure;
+  } finally {
+    await Promise.all((custody ?? []).map(entry => entry.handle.close()));
   }
 }

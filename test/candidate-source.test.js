@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import { inspectLocalCandidate, stageLocalCandidate } from '../review/candidate-source.js';
 import { runGit } from '../review/git-runner.js';
@@ -21,6 +23,7 @@ const policy = {
   schemaVersion: 1,
   approvedBundlePaths: Object.keys(FILES),
 };
+const execFileAsync = promisify(execFile);
 
 async function temporaryRoot(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'resonant-candidate-'));
@@ -40,6 +43,27 @@ async function makeWritable(target) {
   } else {
     await chmod(target, 0o600);
   }
+}
+
+async function realGit(repoRoot, args) {
+  return execFileAsync('/usr/bin/git', ['-C', repoRoot, ...args], {
+    env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+  });
+}
+
+async function realCandidateRepo(t) {
+  const repoRoot = await temporaryRoot(t);
+  for (const [filePath, entry] of Object.entries(FILES)) {
+    const destination = path.join(repoRoot, ...filePath.split('/'));
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, entry.bytes);
+  }
+  await realGit(repoRoot, ['init']);
+  await realGit(repoRoot, ['config', 'user.name', 'Candidate Test']);
+  await realGit(repoRoot, ['config', 'user.email', 'candidate@example.invalid']);
+  await realGit(repoRoot, ['add', '--', ...policy.approvedBundlePaths]);
+  await realGit(repoRoot, ['commit', '-m', 'candidate']);
+  return repoRoot;
 }
 
 test('clean committed HEAD is available without copying or executing candidate files', async t => {
@@ -189,6 +213,35 @@ test('bundle input changes during staging invalidate and remove the new quaranti
   await assert.rejects(lstat(path.join(quarantineRoot, 'review-raced')), /ENOENT/);
 });
 
+test('ancestor substitution cannot redirect failed-staging cleanup into unrelated data', async t => {
+  const repoRoot = await temporaryRoot(t);
+  const outside = await temporaryRoot(t);
+  const quarantineRoot = path.join(repoRoot, 'runtime', 'quarantine');
+  const movedQuarantine = path.join(repoRoot, 'runtime', 'quarantine-created');
+  const outsideReview = path.join(outside, 'review-custody');
+  await mkdir(outsideReview);
+  await writeFile(path.join(outsideReview, 'preserved.txt'), 'unrelated');
+  const git = createFakeGit({
+    files: FILES,
+    statuses: ['', '', ' M package.json\n'],
+    onStatus: async ({ index }) => {
+      if (index !== 2) return;
+      await rename(quarantineRoot, movedQuarantine);
+      await symlink(outside, quarantineRoot);
+    },
+  });
+
+  let caught;
+  try {
+    await stageLocalCandidate({ repoRoot, reviewId: 'review-custody', quarantineRoot, policy, git });
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(await readFile(path.join(outsideReview, 'preserved.txt'), 'utf8'), 'unrelated');
+  assert.equal((await lstat(path.join(movedQuarantine, 'review-custody'))).isDirectory(), true);
+  assert.equal(caught?.code, 'quarantine-custody-changed');
+});
+
 test('archive extraction containment rejects traversal, an outside root, and symlinked quarantine components', async t => {
   const repoRoot = await temporaryRoot(t);
   const outside = await temporaryRoot(t);
@@ -229,4 +282,40 @@ test('default Git runner reads the real local repository with fixed argv', async
   const repoRoot = path.resolve('.');
   const result = await runGit({ repoRoot, args: ['rev-parse', '--is-inside-work-tree'] });
   assert.equal(result.stdout.toString('utf8').trim(), 'true');
+});
+
+test('availability neutralizes a repository-configured fsmonitor executable', async t => {
+  const repoRoot = await realCandidateRepo(t);
+  const marker = path.join(repoRoot, 'fsmonitor-executed');
+  const monitor = path.join(repoRoot, 'fsmonitor.sh');
+  await writeFile(monitor, `#!/bin/sh\n/usr/bin/touch '${marker}'\nprintf '\\0'\n`);
+  await chmod(monitor, 0o700);
+  await realGit(repoRoot, ['config', 'core.fsmonitor', monitor]);
+
+  const result = await inspectLocalCandidate({ repoRoot, activeDigest: '0'.repeat(64), policy });
+
+  assert.equal(result.state, 'available');
+  await assert.rejects(lstat(marker), /ENOENT/);
+});
+
+test('assume-unchanged cannot conceal a modified approved bundle input', async t => {
+  const repoRoot = await realCandidateRepo(t);
+  await realGit(repoRoot, ['update-index', '--assume-unchanged', 'native-host/host.js']);
+  await writeFile(path.join(repoRoot, 'native-host', 'host.js'), 'hidden working-tree modification\n');
+  assert.equal((await realGit(repoRoot, ['status', '--porcelain=v1'])).stdout, '');
+
+  const result = await inspectLocalCandidate({ repoRoot, activeDigest: '0'.repeat(64), policy });
+
+  assert.deepEqual(result, { state: 'blocked', reason: 'bundle-inputs-dirty' });
+});
+
+test('skip-worktree cannot conceal a missing approved bundle input', async t => {
+  const repoRoot = await realCandidateRepo(t);
+  await realGit(repoRoot, ['update-index', '--skip-worktree', 'package.json']);
+  await rm(path.join(repoRoot, 'package.json'));
+  assert.equal((await realGit(repoRoot, ['status', '--porcelain=v1'])).stdout, '');
+
+  const result = await inspectLocalCandidate({ repoRoot, activeDigest: '0'.repeat(64), policy });
+
+  assert.deepEqual(result, { state: 'blocked', reason: 'bundle-inputs-dirty' });
 });

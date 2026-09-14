@@ -14,10 +14,12 @@ function gitBlobOid(bytes) {
 }
 
 export class FakeGit {
-  constructor({ commit = DEFAULT_COMMIT, status = '', statuses = null, files = {} } = {}) {
+  constructor({ commit = DEFAULT_COMMIT, status = '', statuses = null, onStatus = null, files = {} } = {}) {
     this.commit = commit;
     this.status = status;
     this.statuses = statuses === null ? null : [...statuses];
+    this.onStatus = onStatus;
+    this.statusCalls = 0;
     this.files = new Map(Object.entries(files).map(([filePath, entry]) => {
       const bytes = asBuffer(entry.bytes);
       return [filePath, {
@@ -38,6 +40,9 @@ export class FakeGit {
     }
 
     if (args[0] === 'status') {
+      const index = this.statusCalls;
+      this.statusCalls += 1;
+      await this.onStatus?.({ index, repoRoot, args: [...args] });
       const status = this.statuses?.length ? this.statuses.shift() : this.status;
       return { stdout: Buffer.from(status), stderr: Buffer.alloc(0) };
     }
@@ -54,6 +59,15 @@ export class FakeGit {
         ])];
       });
       return { stdout: Buffer.concat(records), stderr: Buffer.alloc(0) };
+    }
+
+    if (args[0] === 'ls-files') {
+      const separator = args.indexOf('--');
+      const requested = args.slice(separator + 1);
+      return {
+        stdout: Buffer.concat(requested.flatMap(filePath => [Buffer.from(`H ${filePath}`), Buffer.from([0])])),
+        stderr: Buffer.alloc(0),
+      };
     }
 
     if (args[0] === 'show' && args.length === 2) {
