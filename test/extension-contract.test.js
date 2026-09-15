@@ -4,6 +4,10 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 import { SidecarSession } from '../extension/sidepanel-controller.js';
+import { bridgeFixture, NOW, RAW, observations, until, wireBinding } from './fixtures/chrome-bridge.js';
+import { ChromeReviewBridge } from '../review/chrome-review-bridge.js';
+import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { buildChromeReviewRequest } from '../review/semantic-evidence.js';
 
 class FakeEvent {
   listeners = [];
@@ -122,7 +126,7 @@ test('review card offers semantic controls, understandable disabled acceptance a
   assert.match(css, /:focus-visible/); assert.match(css, /flex-wrap:\s*wrap/);
 });
 
-async function renderedPanel() {
+async function renderedPanel({ languageModel } = {}) {
   const html = await readFile(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const script = await readFile(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
   const elements = new Map();
@@ -135,9 +139,9 @@ async function renderedPanel() {
       get hidden() { return hidden; },
       set hidden(value) { hidden = value; if (value && (document.activeElement === this || this.contains(document.activeElement))) document.activeElement = document.body; },
       addEventListener(name, callback) { this.listeners[name] = callback; },
-      click() { if (!this.disabled && !this.hidden) this.listeners.click?.(); },
+      click(isTrusted = true) { if (!this.disabled && !this.hidden) this.listeners.click?.({ isTrusted }); },
       focus() { if (!this.disabled && !this.hidden) document.activeElement = this; },
-      contains(other) { return this.id === 'review-card' && ['review-title', 'start-review', 'accept-review', 'reject-review', 'open-report', 'open-desktop', 'dismiss-review'].includes(other?.id); },
+      contains(other) { return this.id === 'review-card' && ['review-title', 'start-review', 'accept-review', 'reject-review', 'open-report', 'open-desktop', 'dismiss-review', 'prepare-chrome-review', 'run-chrome-review', 'cancel-chrome-review'].includes(other?.id); },
       append(...children) { this.children.push(...children); }, scrollIntoView() {},
     };
   }
@@ -146,7 +150,7 @@ async function renderedPanel() {
     const node = element(match[1]); node.hidden = /\bhidden\b/.test(match[0]); node.disabled = /\bdisabled\b/.test(match[0]); elements.set(node.id, node);
   }
   const port = new FakePort(), storage = createStorage(), windowEvents = {};
-  await vm.runInNewContext(`(async () => { ${script.replace(/^import .*;\n/, '')} })()`, { SidecarSession, document, window: { addEventListener(name, listener) { windowEvents[name] = listener; } }, chrome: { runtime: { connectNative: () => port }, storage: { session: storage } } });
+  await vm.runInNewContext(`(async () => { ${script.replace(/^import .*;\n/, '')} })()`, { SidecarSession, LanguageModel: languageModel, document, window: { addEventListener(name, listener) { windowEvents[name] = listener; } }, chrome: { runtime: { connectNative: () => port }, storage: { session: storage } } });
   const node = id => elements.get(id);
   return { node, document, port, elements, windowEvents };
 }
@@ -305,4 +309,189 @@ test('exposes interrupt only while a turn is active', async () => {
 
   assert.deepEqual(port.posted.at(-1), { type: 'turn.interrupt' });
   assert.equal(session.turnActive, false);
+});
+
+const CHROME_NOTICE = 'Local analysis uses a Chrome-managed on-device model that may already be stored or updated on this device.';
+const PREPARE_NOTICE = 'Chrome may download and store an on-device model. Preparation does not run analysis.';
+function fakeModel(availability = 'available', pending = false) {
+  const calls = [], sessions = [];
+  const languageModel = {
+    async availability() { calls.push('availability'); return availability; },
+    create(options) {
+      calls.push('create');
+      const session = { options, destroyed: 0,
+        prompt() { calls.push('prompt'); return pending ? new Promise(() => {}) : Promise.resolve(RAW); },
+        destroy() { this.destroyed++; },
+      }; sessions.push(session); return Promise.resolve(session);
+    },
+  };
+  return { calls, sessions, languageModel };
+}
+function startBoundReview(session, port, binding) {
+  session.requestUpdateStatus(); port.onMessage.emit({ type: 'update.available', reviewId: binding.reviewId, candidateDigest: binding.candidateDigest }); session.startReview();
+  port.onMessage.emit({ type: 'review.started', reviewId: binding.reviewId, candidateDigest: binding.candidateDigest });
+}
+
+test('install, startup, panel opening and update discovery make zero LanguageModel calls', async () => {
+  const model = fakeModel(); const hooks = {}, opens = [];
+  const worker = await readFile(new URL('../extension/service-worker.js', import.meta.url), 'utf8');
+  vm.runInNewContext(worker, { LanguageModel: model.languageModel, chrome: { runtime: {
+    onInstalled: { addListener: callback => { hooks.install = callback; } }, onStartup: { addListener: callback => { hooks.start = callback; } },
+  }, sidePanel: { setPanelBehavior: options => opens.push(options) } } });
+  await hooks.install(); await hooks.start(); const { port } = await renderedPanel(model);
+  port.onMessage.emit({ type: 'update.available', ...reviewBinding });
+  assert.deepEqual(model.calls, []); assert.equal(opens.length, 2); assert.equal(opens.every(options => options.openPanelOnActionClick === true), true);
+});
+
+for (const availability of ['available', 'downloadable', 'downloading']) test(`visible ${availability} controls require disclosures and real direct clicks`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel(availability), h = await renderedPanel(model);
+  t.after(() => h.windowEvents.pagehide());
+  const binding = { reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest };
+  // Rebuild the ready deadline from current time, retaining a correctly bound packet.
+  const request = buildChromeReviewRequest({ evidence: f.packet.evidence, evidenceDigest: f.packet.evidenceDigest, invocationId: f.binding.invocationId,
+    runtimeGeneration: 3, adapterDigest: f.binding.adapterDigest, deadline: new Date(Date.now() + 60000).toISOString() });
+  h.port.onMessage.emit({ type: 'update.available', ...binding }); h.node('start-review').click(); h.port.onMessage.emit({ type: 'review.started', ...binding });
+  h.port.onMessage.emit({ type: 'review.chromeReady', ...wireBinding(request), packet: request.packet });
+  await until(() => model.calls.includes('availability'));
+  await until(() => h.node(availability === 'available' ? 'run-chrome-review' : 'prepare-chrome-review')?.disabled === false);
+  assert.equal(h.node('chrome-review-notice').hidden, false); assert.equal(h.node('chrome-review-notice').textContent, CHROME_NOTICE);
+  if (availability !== 'available') {
+    assert.equal(h.node('chrome-preparation-notice').hidden, false); assert.equal(h.node('chrome-preparation-notice').textContent, PREPARE_NOTICE);
+    h.node('prepare-chrome-review').click(false); assert.deepEqual(model.calls, ['availability']);
+    h.node('chrome-preparation-notice').hidden = true; h.node('prepare-chrome-review').click(); assert.deepEqual(model.calls, ['availability']);
+    h.node('chrome-preparation-notice').hidden = false; h.node('prepare-chrome-review').focus(); h.node('prepare-chrome-review').click();
+    assert.equal(model.calls.at(-1), 'create'); await until(() => h.node('run-chrome-review').disabled === false);
+    assert.equal(model.sessions[0].destroyed, 1); assert.equal(model.calls.includes('prompt'), false);
+    assert.equal(h.document.activeElement.id, 'review-title');
+  }
+  h.node('run-chrome-review').click(false); assert.equal(model.calls.includes('prompt'), false);
+  h.node('chrome-review-notice').hidden = true; h.node('run-chrome-review').click(); assert.equal(model.calls.includes('prompt'), false);
+  h.node('chrome-review-notice').hidden = false; h.node('run-chrome-review').click(); assert.equal(model.calls.at(-1), 'create');
+  await until(() => h.port.posted.some(message => message.type === 'review.chromeResult'));
+  assert.equal(model.calls.filter(call => call === 'availability').length, 1); assert.equal(model.calls.filter(call => call === 'prompt').length, 1);
+  assert.equal([...h.elements.values()].some(node => node.textContent.includes('No blocking concern.')), false);
+  const html = await readFile(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+  assert.match(html, /id="chrome-preparation-notice"[^>]*>[^<]*<\/p>\s*<button id="prepare-chrome-review"/);
+});
+
+for (const invalidation of ['pagehide', 'native disconnect', 'runtime readiness', 'generation change', 'cross-channel', 'cross-restart']) test(`${invalidation} aborts review custody and cannot reuse its ready packet`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel('available', true), port = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, port, f.binding);
+  const ready = { type: 'review.chromeReady', ...f.binding, packet: f.packet }; port.onMessage.emit(ready);
+  await until(() => session.chromeReviewState?.state === 'ready'); const work = session.runChromeReview(); await until(() => model.calls.includes('prompt'));
+  if (invalidation === 'pagehide') session.disconnect();
+  else if (invalidation === 'native disconnect') port.onDisconnect.emit();
+  else if (invalidation === 'runtime readiness') port.onMessage.emit({ type: 'session.ready', threadId: 'same' });
+  else port.onMessage.emit({ ...ready, [invalidation === 'generation change' ? 'runtimeGeneration' : invalidation === 'cross-channel' ? 'channelId' : 'restartId']: invalidation === 'generation change' ? 4 : '33333333-3333-4333-8333-333333333333' });
+  await work; assert.equal(model.sessions[0].options.signal.aborted, true); assert.equal(model.sessions[0].destroyed, 1);
+  port.onMessage.emit(ready); assert.equal(await session.runChromeReview(), false); assert.equal(model.calls.filter(call => call === 'availability').length, 1);
+});
+
+test('unsolicited and cross-review ready cannot create controls or call the model', async t => {
+  const f = await bridgeFixture(t), model = fakeModel(), port = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect();
+  const ready = { type: 'review.chromeReady', ...f.binding, packet: f.packet };
+  port.onMessage.emit(ready); startBoundReview(session, port, f.binding); port.onMessage.emit({ ...ready, reviewId: 'other' });
+  assert.deepEqual(model.calls, []); assert.equal(await session.runChromeReview(), false);
+});
+
+test('emergency Stop synchronously cancels through exact Port to durable journal then interrupts the conversation', async t => {
+  const f = await bridgeFixture(t), model = fakeModel('available', true), port = new FakePort(), events = [];
+  const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: f.binding.restartId }); await journal.recover();
+  const bridge = new ChromeReviewBridge({ journal, send: message => port.onMessage.emit(message), currentChannel: () => f.current, clock: () => NOW, ...observations });
+  t.after(() => bridge.close('connection-loss'));
+  const nativePost = port.postMessage.bind(port);
+  port.postMessage = message => { nativePost(message); if (message.type === 'review.chromeCancel') { assert.equal(model.sessions[0].options.signal.aborted, true); assert.equal(bridge.handleSettlement(message), true); } };
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), onEvent: event => events.push(event), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, port, f.binding);
+  const result = bridge.request({ binding: f.binding, packet: f.packet, deadline: f.deadline });
+  await until(() => session.chromeReviewState?.state === 'ready'); const work = session.runChromeReview(); await until(() => model.calls.includes('prompt'));
+  port.onMessage.emit({ type: 'turn.started' }); const before = port.posted.length;
+  session.emergencyStop();
+  assert.deepEqual(port.posted.slice(before).map(message => message.type), ['review.chromeCancel', 'turn.interrupt']);
+  assert.equal(port.posted[before].reasonCode, 'emergency-stop'); assert.equal(events.at(-1).type, 'emergency.stopped');
+  await work; assert.equal((await result).reasonCode, 'emergency-stop'); assert.equal(journal.recoveryState(), 'terminal-unreceipted');
+  assert.equal(journal.snapshot().receiptCommitted, false, 'permanent coordinator reconciliation is Task 8, never fabricated by the panel');
+  assert.equal(model.sessions[0].destroyed, 1);
+});
+
+test('review production surface has no added browser, transport or alternate-model capability', async () => {
+  for (const file of ['chrome-review-adapter.js', 'sidepanel-controller.js', 'sidepanel.js', 'service-worker.js']) {
+    const source = await readFile(new URL('../extension/' + file, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /\bfetch\s*\(|localhost|9931|llama|gpt-oss|Eloquent|Gemma|https?:\/\/|\b(?:WebSocket|XMLHttpRequest|EventSource)\b|chrome\.(?:tabs|cookies|history|debugger|scripting)\b/);
+  }
+});
+
+for (const phase of ['pending', 'cancelled']) test(`native eligibility cannot overtake a ${phase} Chrome invocation`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel(), port = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, port, f.binding);
+  port.onMessage.emit({ type: 'review.chromeReady', ...f.binding, packet: f.packet }); await until(() => session.chromeReviewState?.state === 'ready');
+  if (phase === 'cancelled') session.cancelChromeReview();
+  port.onMessage.emit({ ...eligible, reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest, policyDigest: f.binding.policyDigest });
+  assert.throws(() => session.acceptReview()); assert.throws(() => session.rejectReview());
+});
+
+test('reconnected Port rejects a retained old ready callback and late model completion', async t => {
+  const f = await bridgeFixture(t), oldPort = new FakePort(), freshPort = new FakePort(); let resolveModel, connections = 0;
+  const model = fakeModel(); model.languageModel.create = options => Promise.resolve({
+    prompt() { model.calls.push('prompt'); return new Promise(resolve => { resolveModel = resolve; }); }, destroy() {},
+  });
+  const session = new SidecarSession({ connectNative: () => ++connections === 1 ? oldPort : freshPort, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, oldPort, f.binding);
+  const ready = { type: 'review.chromeReady', ...f.binding, packet: f.packet };
+  oldPort.onMessage.emit(ready); await until(() => session.chromeReviewState?.state === 'ready'); const work = session.runChromeReview(); await until(() => model.calls.includes('prompt'));
+  session.disconnect(); await work; await session.connect(); oldPort.onMessage.emit(ready); resolveModel(RAW);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(freshPort.posted, [{ type: 'session.open', threadId: null }]); assert.equal(model.calls.filter(call => call === 'availability').length, 1);
+  assert.equal(await session.runChromeReview(), false);
+});
+
+test('emergency Stop still interrupts when bound cancel cannot be delivered', async t => {
+  const f = await bridgeFixture(t), model = fakeModel('available', true), port = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, port, f.binding);
+  port.onMessage.emit({ type: 'review.chromeReady', ...f.binding, packet: f.packet }); await until(() => session.chromeReviewState?.state === 'ready');
+  const work = session.runChromeReview(); await until(() => model.calls.includes('prompt')); port.onMessage.emit({ type: 'turn.started' });
+  const original = port.postMessage.bind(port); port.postMessage = message => { if (message.type === 'review.chromeCancel') throw new Error('closed'); original(message); };
+  session.emergencyStop(); assert.equal(port.posted.at(-1).type, 'turn.interrupt'); assert.equal(model.sessions[0].options.signal.aborted, true); await work;
+});
+
+test('completed Chrome review accepts only a current matching policy grant', async t => {
+  const f = await bridgeFixture(t), model = fakeModel(), port = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, port, f.binding);
+  port.onMessage.emit({ type: 'review.chromeReady', ...f.binding, packet: f.packet }); await until(() => session.chromeReviewState?.state === 'ready');
+  await session.runChromeReview();
+  port.onMessage.emit({ ...eligible, reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest });
+  assert.throws(() => session.acceptReview());
+  port.onMessage.emit({ ...eligible, reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest, policyDigest: f.binding.policyDigest });
+  session.acceptReview(); assert.equal(port.posted.at(-1).type, 'review.accept');
+});
+
+for (const action of ['Stop', 'Cancel analysis', 'pagehide']) test(`rendered ${action} aborts the active model and preserves the conversation/evidence boundary`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel('available', true), h = await renderedPanel(model);
+  t.after(() => h.windowEvents.pagehide());
+  const request = buildChromeReviewRequest({ evidence: f.packet.evidence, evidenceDigest: f.packet.evidenceDigest, invocationId: f.binding.invocationId,
+    runtimeGeneration: 3, adapterDigest: f.binding.adapterDigest, deadline: new Date(Date.now() + 60000).toISOString() });
+  const binding = { reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest };
+  h.port.onMessage.emit({ type: 'update.available', ...binding }); h.node('start-review').click(); h.port.onMessage.emit({ type: 'review.started', ...binding });
+  h.port.onMessage.emit({ type: 'review.chromeReady', ...wireBinding(request), packet: request.packet });
+  await until(() => h.node('run-chrome-review')?.disabled === false);
+  assert.equal(h.node('stop-button').disabled, false, 'review Stop is available even without a conversation turn');
+  h.node('run-chrome-review').click(); await until(() => model.calls.includes('prompt'));
+  h.port.onMessage.emit({ type: 'turn.started' }); h.port.onMessage.emit({ type: 'assistant.delta', text: 'Prior conversation evidence' });
+  const transcriptCount = h.node('transcript').children.length, before = h.port.posted.length;
+  if (action === 'pagehide') h.windowEvents.pagehide();
+  else h.node(action === 'Stop' ? 'stop-button' : 'cancel-chrome-review').click();
+  const messages = h.port.posted.slice(before);
+  assert.equal(messages[0].type, 'review.chromeCancel');
+  assert.equal(messages[0].reasonCode, action === 'Stop' ? 'emergency-stop' : action === 'pagehide' ? 'panel-closure' : 'cancellation');
+  assert.equal(model.sessions[0].options.signal.aborted, true); assert.equal(model.sessions[0].destroyed, 1);
+  assert.equal(messages.some(message => message.type === 'turn.interrupt'), action === 'Stop');
+  assert.equal(h.node('transcript').children.length, transcriptCount);
+  if (action === 'Stop') assert.equal(h.node('connection-status').textContent, 'Stopped');
+  if (action === 'Cancel analysis') { assert.equal(h.node('stop-button').disabled, false); assert.equal(h.port.closed, false); }
 });

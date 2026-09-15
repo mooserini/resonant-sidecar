@@ -170,6 +170,9 @@ button:focus-visible, textarea:focus-visible, #review-title:focus-visible {
 .review-card p { font-size: 0.8rem; line-height: 1.5; }
 .review-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.65rem; }
 .review-actions button { max-width: 100%; line-height: 1.4; }
+#chrome-review-controls { border-top: 1px solid var(--line); margin-top: 0.8rem; padding-top: 0.4rem; }
+#chrome-review-controls button { max-width: 100%; line-height: 1.4; margin: 0.2rem 0; }
+#chrome-review-notice, #chrome-preparation-notice { color: #c9d4da; }
 @media (max-width: 240px) { .actions { grid-template-columns: 1fr; } }
 
 .error {

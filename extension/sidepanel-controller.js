@@ -1,3 +1,6 @@
+import { createChromeReviewAdapter } from './chrome-review-adapter.js';
+import { snapshotChromeReviewValue } from './chrome-review-contract.js';
+
 const HOST_NAME = 'com.resonantmirror.sidecar';
 const THREAD_STORAGE_KEY = 'codexThreadId';
 
@@ -22,9 +25,13 @@ function lifecycleEvent(value) {
 export class SidecarSession {
   #reviewState = 'idle'; #review = null; #decision = null; #statusRequested = false; #connecting = null;
   #connectionGeneration = 0;
+  #chrome = null; #chromeState = Object.freeze({ state: 'idle' }); #chromeOptions;
   get reviewState() { return this.#reviewState; }
   get canNavigateReview() { return this.#reviewState === 'failed' && this.#review !== null; }
-  constructor({ connectNative, storage, onEvent = () => {} }) {
+  get chromeReviewState() { return this.#chromeState; }
+  get chromeReviewActive() { return this.#chrome !== null && !this.#chrome.revoked && !['completed', 'failed', 'stopped'].includes(this.#chromeState.state); }
+  constructor({ connectNative, storage, onEvent = () => {}, languageModel, chromeReviewOptions = {} }) {
+    this.#chromeOptions = { languageModel, clock: chromeReviewOptions.clock, setTimer: chromeReviewOptions.setTimer, clearTimer: chromeReviewOptions.clearTimer };
     this.connectNative = connectNative;
     this.storage = storage;
     this.onEvent = onEvent;
@@ -47,7 +54,7 @@ export class SidecarSession {
     this.port = this.connectNative(HOST_NAME);
     const port = this.port;
     port.onMessage.addListener(message => { if (this.port === port) this.#handleMessage(message); });
-    port.onDisconnect.addListener(() => this.#closeConnection(port));
+    port.onDisconnect.addListener(() => this.#closeConnection(port, 'connection-loss'));
     this.port.postMessage({
       type: 'session.open',
       threadId: typeof stored[THREAD_STORAGE_KEY] === 'string'
@@ -68,15 +75,62 @@ export class SidecarSession {
     this.port.postMessage({ type: 'turn.interrupt' });
   }
 
+  emergencyStop() {
+    // Abort/latch and send the bound cancellation before conversation interrupt.
+    // Neither operation waits for model creation, inference or journal I/O.
+    this.#invalidateChrome('emergency-stop');
+    try { if (this.turnActive) this.interrupt(); }
+    finally { this.onEvent({ type: 'emergency.stopped' }); }
+  }
+
+  prepareChromeReview() { return this.#ownsChrome() ? this.#chrome.adapter.prepare() : Promise.resolve(false); }
+  runChromeReview() { return this.#ownsChrome() ? this.#chrome.adapter.run() : Promise.resolve(false); }
+  cancelChromeReview() { this.#invalidateChrome('cancellation'); }
+
+  #ownsChrome(owner = this.#chrome) {
+    return owner !== null && this.#chrome === owner && !owner.revoked && this.port === owner.port && this.#connectionGeneration === owner.connectionGeneration;
+  }
+  #invalidateChrome(reason) {
+    const owner = this.#chrome;
+    if (!owner || owner.revoked) return;
+    owner.adapter.destroy(reason);
+    owner.revoked = true;
+  }
+  #chromeReady(value) {
+    let request;
+    try { request = snapshotChromeReviewValue(value); } catch { return; }
+    if (this.#reviewState !== 'reviewing' || !this.port || !this.#review || request.reviewId !== this.#review.reviewId || request.candidateDigest !== this.#review.candidateDigest) return;
+    if (this.#chrome) {
+      // The first issued identity belongs to this exact established Port. A
+      // changed generation/channel cannot replace a pending invocation.
+      if (Object.keys(this.#chrome.binding).some(key => request[key] !== this.#chrome.binding[key])) this.#invalidateChrome('provenance-drift');
+      return;
+    }
+    const owner = { port: this.port, connectionGeneration: this.#connectionGeneration, revoked: false,
+      binding: Object.freeze(Object.fromEntries(Object.entries(request).filter(([key]) => key !== 'packet' && key !== 'type'))) };
+    const send = message => {
+      if (!this.#ownsChrome(owner) || Object.keys(owner.binding).some(key => message[key] !== owner.binding[key])) return;
+      owner.port.postMessage(message);
+    };
+    owner.adapter = createChromeReviewAdapter({ ...this.#chromeOptions, sendResult: send, sendCancel: send, onState: state => {
+      if (!this.#ownsChrome(owner)) return;
+      this.#chromeState = state; this.onEvent({ type: 'review.chromeState' });
+    } });
+    this.#chrome = owner;
+    void owner.adapter.inspect(request);
+  }
+
   disconnect() {
     const port = this.port;
     try { this.#closeConnection(port); }
     finally { port?.disconnect(); }
   }
 
-  #closeConnection(port) {
+  #closeConnection(port, reason = 'panel-closure') {
     if (this.port !== port || (!port && !this.#connecting)) return;
+    this.#invalidateChrome(reason);
     ++this.#connectionGeneration;
+    this.#chrome = null; this.#chromeState = Object.freeze({ state: 'idle' });
     this.port = null; this.#connecting = null; this.turnActive = false;
     this.#reviewState = 'idle'; this.#review = this.#decision = null; this.#statusRequested = false;
     this.pending = Promise.resolve();
@@ -123,6 +177,7 @@ export class SidecarSession {
   #lifecycle(value) {
     let event;
     try { event = lifecycleEvent(value); } catch { return; }
+    if (event.type === 'review.eligible' && this.#chrome && (!this.#ownsChrome() || this.#chromeState.state !== 'completed' || event.policyDigest !== this.#chrome.binding.policyDigest)) return;
     const same = this.#review && event.reviewId === this.#review.reviewId && event.candidateDigest === this.#review.candidateDigest;
     if (event.type === 'update.available') {
       if (this.#reviewState !== 'idle' || !this.#statusRequested) return;
@@ -130,6 +185,7 @@ export class SidecarSession {
     } else if (event.type === 'review.failed') {
       if ((!same && !(this.#reviewState === 'idle' && this.#statusRequested && event.reviewId === null)) || ['failed', 'completed', 'dismissed'].includes(this.#reviewState)) return;
       this.#reviewState = 'failed'; this.#decision = null; this.#statusRequested = false;
+      this.#invalidateChrome('custody-failure');
     } else {
       if (!same) return;
       const transitions = { 'review.started': ['requested', 'reviewing'], 'review.eligible': ['reviewing', 'eligible'], 'activation.started': ['accepting', 'activating'], 'activation.completed': ['activating', 'completed'], 'activation.rolledBack': ['activating', 'failed'] };
@@ -149,9 +205,11 @@ export class SidecarSession {
     if (!message || typeof message !== 'object') return;
     const type = Object.getOwnPropertyDescriptor(message, 'type')?.value;
     if (typeof type !== 'string') return;
+    if (type === 'review.chromeReady') { this.#chromeReady(message); return; }
     if (/^(review|update|activation)\./.test(type)) { this.#lifecycle(message); return; }
 
     if (message.type === 'session.ready' && typeof message.threadId === 'string') {
+      this.#invalidateChrome('provenance-drift');
       this.turnActive = false;
       this.pending = this.storage.set({ [THREAD_STORAGE_KEY]: message.threadId });
     }

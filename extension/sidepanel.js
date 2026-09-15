@@ -12,6 +12,13 @@ const reviewCard = document.querySelector('#review-card');
 const reviewTitle = document.querySelector('#review-title');
 const reviewStatus = document.querySelector('#review-status');
 const reviewButtons = Object.fromEntries(['start-review', 'accept-review', 'reject-review', 'open-report', 'open-desktop', 'dismiss-review'].map(id => [id, document.getElementById(id)]));
+const chromeControls = document.getElementById('chrome-review-controls');
+const chromeNotice = document.getElementById('chrome-review-notice');
+const preparationNotice = document.getElementById('chrome-preparation-notice');
+const chromeStatus = document.getElementById('chrome-review-status');
+const chromeButtons = Object.fromEntries(['prepare-chrome-review', 'run-chrome-review', 'cancel-chrome-review'].map(id => [id, document.getElementById(id)]));
+const CHROME_NOTICE = 'Local analysis uses a Chrome-managed on-device model that may already be stored or updated on this device.';
+const PREPARATION_NOTICE = 'Chrome may download and store an on-device model. Preparation does not run analysis.';
 
 let assistantBody = null;
 
@@ -23,7 +30,7 @@ function setStatus(label, state) {
 function setBusy(busy) {
   text.disabled = busy;
   sendButton.disabled = busy;
-  stopButton.disabled = !busy;
+  stopButton.disabled = !busy && !session.chromeReviewActive;
 }
 
 function showError(message) {
@@ -50,6 +57,9 @@ function appendMessage(role, content = '') {
 
 function handleEvent(event) {
   if (/^(review|update|activation)\./.test(event.type)) { renderReview(); return; }
+  if (event.type === 'emergency.stopped') {
+    setStatus('Stopped', 'ready'); announcement.textContent = 'Stop requested.'; return;
+  }
   if (event.type === 'session.ready') {
     setBusy(false);
     setStatus('Ready', 'ready');
@@ -105,9 +115,23 @@ function renderReview() {
     hidden: !visible.includes(id),
     disabled: (id === 'accept-review' && state !== 'eligible') || (['open-report', 'open-desktop'].includes(id) && !session.canNavigateReview),
   }));
+  const chromeState = session.chromeReviewState.state;
+  const chromeVisible = state === 'reviewing' && ['checking', 'ready', 'preparation-required', 'preparing', 'running', 'completed'].includes(chromeState);
+  const prepare = chromeVisible && ['preparation-required', 'preparing'].includes(chromeState);
+  controls.push(...Object.entries(chromeButtons).map(([id, button]) => ({ button,
+    hidden: !chromeVisible || (id === 'prepare-chrome-review' ? !prepare : id === 'run-chrome-review' ? !['ready', 'running'].includes(chromeState) : chromeState === 'completed'),
+    disabled: id === 'prepare-chrome-review' ? chromeState !== 'preparation-required' : id === 'run-chrome-review' ? chromeState !== 'ready' : !session.chromeReviewActive,
+  })));
   // Chromium may blur a disabled/hidden button immediately. Decide where its
   // focus belongs from the old element and the intended state, before writes.
   const displacesFocus = focusWasInCard && controls.some(({ button, hidden, disabled }) => button === focused && (hidden || disabled));
+  // Disclosures are committed before either resource-creating button enables.
+  chromeNotice.textContent = CHROME_NOTICE; chromeNotice.hidden = !chromeVisible;
+  preparationNotice.textContent = PREPARATION_NOTICE; preparationNotice.hidden = !prepare;
+  chromeControls.hidden = !chromeVisible;
+  const chromeLabels = { checking: 'Checking Chrome reviewer', ready: 'Chrome reviewer ready', 'preparation-required': 'Chrome reviewer preparation required', preparing: 'Preparing Chrome reviewer', running: 'Local analysis in progress', completed: 'Local analysis complete' };
+  chromeStatus.textContent = chromeLabels[chromeState] ?? '';
+  stopButton.disabled = !session.turnActive && !session.chromeReviewActive;
   reviewCard.hidden = !Object.hasOwn(labels, state);
   if (reviewCard.hidden) { if (focusWasInCard) (session.turnActive ? stopButton : text).focus(); return; }
   reviewTitle.textContent = labels[state];
@@ -124,6 +148,7 @@ function renderReview() {
 const session = new SidecarSession({
   connectNative: name => chrome.runtime.connectNative(name),
   storage: chrome.storage.session,
+  languageModel: globalThis.LanguageModel,
   onEvent: handleEvent,
 });
 
@@ -140,9 +165,20 @@ form.addEventListener('submit', event => {
 });
 
 stopButton.addEventListener('click', () => {
-  try { session.interrupt(); announcement.textContent = 'Stop requested.'; }
+  try { session.emergencyStop(); }
   catch { showError('Stop could not be requested. The local connection is unavailable.'); }
 });
+
+for (const [id, method] of Object.entries({ 'prepare-chrome-review': 'prepareChromeReview', 'run-chrome-review': 'runChromeReview', 'cancel-chrome-review': 'cancelChromeReview' })) {
+  chromeButtons[id].addEventListener('click', event => {
+    const button = chromeButtons[id];
+    if (!event.isTrusted || button.hidden || button.disabled || chromeControls.hidden || reviewCard.hidden) return;
+    if (id !== 'cancel-chrome-review' && (chromeNotice.hidden || chromeNotice.textContent !== CHROME_NOTICE)) return;
+    if (id === 'prepare-chrome-review' && (preparationNotice.hidden || preparationNotice.textContent !== PREPARATION_NOTICE)) return;
+    // No await before this method: create must retain the direct user gesture.
+    void session[method]();
+  });
+}
 
 for (const [id, method] of Object.entries({ 'start-review': 'startReview', 'accept-review': 'acceptReview', 'reject-review': 'rejectReview', 'open-report': 'openReport', 'open-desktop': 'openDesktop', 'dismiss-review': 'dismissReview' })) {
   reviewButtons[id].addEventListener('click', () => { try { session[method](); } catch { /* State-gated actions cannot add diagnostics to the failure card. */ } renderReview(); });

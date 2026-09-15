@@ -19,6 +19,14 @@
       <section id="review-card" class="review-card" aria-labelledby="review-title" hidden>
         <h2 id="review-title" tabindex="-1">Update available</h2>
         <p id="review-status">Accept becomes available after verification.</p>
+        <div id="chrome-review-controls" hidden>
+          <p id="chrome-review-notice" hidden>Local analysis uses a Chrome-managed on-device model that may already be stored or updated on this device.</p>
+          <p id="chrome-review-status"></p>
+          <p id="chrome-preparation-notice" hidden>Chrome may download and store an on-device model. Preparation does not run analysis.</p>
+          <button id="prepare-chrome-review" type="button" hidden disabled aria-describedby="chrome-review-notice chrome-preparation-notice">Prepare Chrome reviewer</button>
+          <button id="run-chrome-review" type="button" hidden disabled aria-describedby="chrome-review-notice">Run local analysis</button>
+          <button id="cancel-chrome-review" type="button" hidden disabled>Cancel analysis</button>
+        </div>
         <div class="review-actions">
           <button id="start-review" type="button">Review and Refresh</button>
           <button id="accept-review" type="button" disabled aria-describedby="review-status">Accept and refresh</button>
