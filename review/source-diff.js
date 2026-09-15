@@ -49,7 +49,12 @@ async function verifiedRead(root, file) {
   const handle = await fs.open(path.join(root, file.path), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const held = await handle.stat({ bigint: true });
-    if (!held.isFile() || !sameIdentity(before.at(-1), held) || Number(held.mode & 0o777n) !== file.mode || held.size !== BigInt(file.bytes)) throw new TypeError('Incomplete source input');
+    // Staging/version custody seals source files as 0400 while retaining the
+    // original source mode in the manifest. Either representation is readable;
+    // the manifest, not the custody mode, determines source-mode differences.
+    const permissions = Number(held.mode & 0o7777n);
+    const supportedMode = (permissions & 0o7000) === 0 && (permissions === file.mode || permissions === 0o400);
+    if (!held.isFile() || !sameIdentity(before.at(-1), held) || !supportedMode || held.size !== BigInt(file.bytes)) throw new TypeError('Incomplete source input');
     // The manifest fixes the read size, so a growing/replaced file cannot turn
     // a verified source read into an unbounded stream or silently truncated file.
     const bytes = Buffer.alloc(file.bytes);

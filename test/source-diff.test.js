@@ -37,6 +37,37 @@ test('unchanged files are still verified', async t => {
   assert.equal((await buildSourceDiff(input)).type, 'IncompleteSourceDiff');
 });
 
+test('sealed custody files retain manifest source modes and complete source evidence', async t => {
+  let input;
+  // Registered first so this test-owned fixture is writable for normal cleanup.
+  t.after(async () => {
+    if (input) for (const root of [input.activeRoot, input.candidateRoot]) {
+      await fs.chmod(root, 0o700);
+      await fs.chmod(path.join(root, 'native-host'), 0o700);
+    }
+  });
+  input = await sourceFixture(t);
+  for (const root of [input.activeRoot, input.candidateRoot]) {
+    await fs.chmod(path.join(root, SOURCE_PATH), 0o400);
+    await fs.chmod(path.join(root, 'native-host'), 0o500);
+    await fs.chmod(root, 0o500);
+  }
+  assert.equal(input.activeManifest.files[0].mode, 0o644);
+  assert.equal(input.candidateManifest.files[0].mode, 0o644);
+  const diff = await buildSourceDiff(input);
+  assert.equal(diff.type, 'CompleteSourceDiff');
+  assert.equal(diff.changedFiles[0].beforeText, BEFORE);
+  assert.equal(diff.changedFiles[0].afterText, AFTER);
+  for (const root of [input.activeRoot, input.candidateRoot]) assert.equal((await fs.lstat(path.join(root, SOURCE_PATH))).mode & 0o7777, 0o400);
+});
+
+for (const specialMode of [0o4644, 0o2644, 0o1644]) test(`rejects special permission bits ${specialMode.toString(8)}`, async t => {
+  const input = await sourceFixture(t);
+  await fs.chmod(path.join(input.candidateRoot, SOURCE_PATH), specialMode);
+  assert.equal((await fs.lstat(path.join(input.candidateRoot, SOURCE_PATH))).mode & 0o7777, specialMode);
+  assert.equal((await buildSourceDiff(input)).type, 'IncompleteSourceDiff');
+});
+
 test('mode-only changes include both complete source sides', async t => {
   const input = await sourceFixture(t, { [SOURCE_PATH]: BEFORE }, { [SOURCE_PATH]: BEFORE });
   input.candidateManifest.files[0].mode = 0o755;

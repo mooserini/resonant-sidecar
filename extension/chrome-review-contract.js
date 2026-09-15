@@ -73,6 +73,77 @@ export function canonicalReviewJson(value) {
   return encode(value);
 }
 
+function compareReviewPaths(left, right) {
+  const utf8 = new TextEncoder();
+  const a = utf8.encode(left);
+  const b = utf8.encode(right);
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+}
+
+function manifestFiles(manifest, digest) {
+  exactReviewKeys(manifest, ['bundleDigest', 'capabilities', 'dependencies', 'files', 'schemaVersion', 'sourceCommit']);
+  requireValue(manifest.bundleDigest === digest && manifest.schemaVersion === 1);
+  requireValue(Array.isArray(manifest.files) && manifest.files.length > 0);
+  const files = new Map();
+  let previous = null;
+  for (const file of manifest.files) {
+    exactReviewKeys(file, ['path', 'sha256', 'bytes', 'mode']);
+    requireValue(typeof file.path === 'string' && file.path.isWellFormed() && !/[\u0000-\u001f\u007f\\]/.test(file.path));
+    requireValue(file.path.split('/').every(part => part.length > 0 && part !== '.' && part !== '..'));
+    requireValue(previous === null || compareReviewPaths(previous, file.path) < 0);
+    requireValue(typeof file.sha256 === 'string' && /^[a-f0-9]{64}$/.test(file.sha256));
+    requireValue(Number.isSafeInteger(file.bytes) && file.bytes >= 0);
+    requireValue(Number.isSafeInteger(file.mode) && file.mode >= 0 && file.mode <= 0o777);
+    files.set(file.path, file);
+    previous = file.path;
+  }
+  return files;
+}
+
+function expectedManifestChanges(evidence) {
+  const before = manifestFiles(evidence.activeManifest, evidence.activeBundleDigest);
+  const after = manifestFiles(evidence.candidateManifest, evidence.candidateBundleDigest);
+  return [...new Set([...before.keys(), ...after.keys()])].sort(compareReviewPaths).flatMap(path => {
+    const left = before.get(path) ?? null;
+    const right = after.get(path) ?? null;
+    if (left && right && left.sha256 === right.sha256 && left.bytes === right.bytes && left.mode === right.mode) return [];
+    return [{ path, change: left === null ? 'added' : right === null ? 'deleted' : 'modified', before: left, after: right }];
+  });
+}
+
+function assertDeterministicStructure(evidence) {
+  const result = evidence.deterministic;
+  const keys = ['passed', 'checks', 'activeBundleDigest', 'candidateBundleDigest', 'policySnapshotHash'];
+  exactReviewKeys(result, Object.hasOwn(result, 'verifierIdentities') ? [...keys, 'verifierIdentities'] : keys);
+  requireValue(typeof result.passed === 'boolean' && Array.isArray(result.checks) && result.checks.length <= 2000);
+  requireValue(result.activeBundleDigest === evidence.activeBundleDigest && result.candidateBundleDigest === evidence.candidateBundleDigest && result.policySnapshotHash === evidence.policyDigest);
+  const checkKeys = new Set(['name', 'passed', 'exitCode', 'outputDigest', 'command', 'argv', 'status', 'reasonCode', 'actual', 'expected', 'matches', 'present']);
+  for (const check of result.checks) {
+    requireValue(check !== null && typeof check === 'object' && !Array.isArray(check));
+    requireValue(Object.keys(check).every(key => checkKeys.has(key)));
+    requireValue(typeof check.name === 'string' && check.name.length <= 100);
+    for (const [key, value] of Object.entries(check)) {
+      if (['passed', 'matches', 'present'].includes(key)) requireValue(typeof value === 'boolean');
+      else if (key === 'exitCode') requireValue(Number.isSafeInteger(value));
+      else if (key === 'outputDigest') requireValue(typeof value === 'string' && /^[a-f0-9]{64}$/.test(value));
+      else if (key === 'status' || key === 'reasonCode') requireValue(typeof value === 'string' && /^[a-z][a-z0-9-]{0,99}$/.test(value));
+      else if (key === 'command' || key === 'argv') {
+        requireValue(Array.isArray(value) && value.every(item => typeof item === 'string'));
+        requireValue(evidence.policy.trustedTestCommands.some(command => canonicalReviewJson(command) === canonicalReviewJson(value)));
+      } else requireValue(value === null || ['string', 'boolean', 'number'].includes(typeof value));
+    }
+  }
+  if (Object.hasOwn(result, 'verifierIdentities')) {
+    requireValue(Array.isArray(result.verifierIdentities) && result.verifierIdentities.length <= 2000);
+    for (const identity of result.verifierIdentities) {
+      exactReviewKeys(identity, ['name', 'sha256']);
+      requireValue(typeof identity.name === 'string' && identity.name.length <= 100);
+      requireValue(typeof identity.sha256 === 'string' && /^[a-f0-9]{64}$/.test(identity.sha256));
+    }
+  }
+}
+
 // Structural gate only. Trusted Node code verifies manifests/source/digests
 // before transport; the adapter must verify transport hashes before rendering.
 export function assertCompleteEvidenceShape(evidence) {
@@ -86,12 +157,15 @@ export function assertCompleteEvidenceShape(evidence) {
   requireValue(diff.activeBundleDigest === evidence.activeBundleDigest && diff.candidateBundleDigest === evidence.candidateBundleDigest);
   requireValue(Array.isArray(diff.changedFiles) && Array.isArray(diff.coverage) && diff.changedFiles.length === diff.coverage.length);
   requireValue(Number.isSafeInteger(diff.encodedBytes) && diff.encodedBytes >= 0);
+  assertDeterministicStructure(evidence);
+  const expected = expectedManifestChanges(evidence);
+  requireValue(expected.length === diff.changedFiles.length);
   const utf8 = new TextEncoder();
   for (let i = 0; i < diff.changedFiles.length; i++) {
     const file = diff.changedFiles[i];
     exactReviewKeys(file, ['path', 'change', 'beforeSha256', 'afterSha256', 'beforeBytes', 'afterBytes', 'beforeText', 'afterText']);
     requireValue(typeof file.path === 'string' && !/[\u0000-\u001f\u007f]/.test(file.path));
-    requireValue(['added', 'deleted', 'modified'].includes(file.change));
+    requireValue(file.path === expected[i].path && file.change === expected[i].change);
     const coverage = diff.coverage[i];
     exactReviewKeys(coverage, ['path', 'before', 'after']);
     requireValue(coverage.path === file.path);
@@ -102,6 +176,7 @@ export function assertCompleteEvidenceShape(evidence) {
       } else {
         const text = file[side + 'Text'];
         const bytes = file[side + 'Bytes'];
+        requireValue(expected[i][side] !== null && bytes === expected[i][side].bytes && file[side + 'Sha256'] === expected[i][side].sha256);
         requireValue(typeof text === 'string' && text.isWellFormed() && Number.isSafeInteger(bytes) && bytes >= 0 && utf8.encode(text).length === bytes);
         requireValue(typeof file[side + 'Sha256'] === 'string' && /^[a-f0-9]{64}$/.test(file[side + 'Sha256']));
         requireValue(canonicalReviewJson(coverage[side]) === canonicalReviewJson({ byteLength: bytes, ranges: [[0, bytes]], omittedRanges: [] }));
