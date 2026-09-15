@@ -158,9 +158,14 @@ form.addEventListener('submit', event => {
   if (!content.trim()) return;
 
   errorMessage.hidden = true;
+  try {
+    session.sendTurn(content);
+  } catch {
+    showError('Sidecar is not connected.');
+    return;
+  }
   appendMessage('user', content);
   setBusy(true);
-  session.sendTurn(content);
   text.value = '';
 });
 
