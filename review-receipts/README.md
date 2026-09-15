@@ -56,10 +56,15 @@ trusted policy test command. Attestation prose is bounded and scanned, but its
 provenance still depends on the trusted producer; no string filter can determine
 whether arbitrary innocuous prose was copied from a page.
 
-A sanitization rejection appends one fixed `review-failed` event with outcome
+A sanitization rejection appends one trusted `review-failed` event with outcome
 `sanitization-failed`, null bundle digests, empty evidence, and sanitizer identity.
 It retains none of the input, including its review ID, and then rejects the call
 with a fixed `SanitizationError`. Schema failures reject without an append.
+V1 retains its historical fixed `sanitization-failure` review ID and sanitizer
+version 1. V2 uses sanitizer version 2 and the first unused
+`sanitization-failure-v2-<n>` review ID, starting at 1 and checking all existing
+V1/V2 review IDs. This prevents anonymous failures from colliding across policy
+versions or with an existing ordinary review.
 Callers should not append a duplicate failure for a `SanitizationError`.
 That generic fallback cannot terminalize the original Chrome invocation: it
 retains no rejected binding fields. The trusted coordinator must sanitize the
@@ -124,6 +129,14 @@ coverage and reason are incomplete-input, execution is not-run, and eligibility
 is candidate-withheld. This records oversized evidence without running a model.
 Earlier failures in other prerequisites can have a null hash and no artifact.
 
+The first artifact and terminal record must match the review, active bundle,
+candidate bundle and policy identities of the Chrome-entry event (or the
+permitted deterministic-review predecessor for incomplete input). Chrome entry
+creates a per-review pending obligation. An intervening staged/review-entry
+event cannot replace it; only a bound eligible/review-failed event settles it.
+A custody-broken event can retain the pending obligation but cannot erase it or
+make a later terminal event bypass the immediate-predecessor requirement.
+
 After binding, every later event for that review carries identical artifact
 bytes and hash. Omitting semanticReview from later producer input carries the
 verified artifact forward, including after restart. Explicit replacement or
@@ -157,6 +170,28 @@ to these codes by trusted lifecycle code. Success uses null reason and
 prerequisite-satisfied; failures use candidate-withheld. Availability is one of
 available, api-absent, setup-required, setup-declined, unavailable, not-checked;
 execution is completed, failed or not-run.
+
+The accepted reason/status combinations are exact:
+
+| Reason | Availability | Execution | Analysis |
+| --- | --- | --- | --- |
+| null | available | completed | no-blocking-concern |
+| api-absent, setup-required, setup-declined, unavailable | same value as reason | not-run | null |
+| incomplete-input | not-checked | not-run | null |
+| malformed-output | available | failed | null |
+| unfavorable-analysis | available | completed | blocking-concern |
+| inconclusive-analysis | available | completed | inconclusive |
+| terminal-receipt-interrupted | available or not-checked | failed | null |
+| timeout, cancellation, panel-closure, browser-restart, connection-loss, provenance-drift, sanitization-failure, custody-failure | available | failed | null |
+| those same eight interruption/failure reasons | any of the six allowlisted availability states | not-run | null |
+
+Coverage is complete-input-supplied for every row except incomplete-input, which
+requires incomplete-input. Completed analyses require their matching digest;
+all null analyses require a null digest. The success row alone satisfies the
+prerequisite; every other row withholds the candidate. A not-run interruption
+can preserve the last known availability while waiting for user initiation;
+failed inference requires available. A terminal-receipt interruption can instead
+record not-checked when the pre-crash availability is not retained.
 
 Semantic sanitization rejects unknown fields, raw diagnostics, recognizable
 prompt/source/command/URL/path forms, and forbidden provenance/safety claims.

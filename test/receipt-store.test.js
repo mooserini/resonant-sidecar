@@ -211,7 +211,7 @@ test('V2 rejected semantic payload retains only fixed sanitized failure metadata
   const chain = await store.verifyChain();
   assert.equal(chain.state, 'intact'); assert.equal(chain.count, 6);
   const failure = chain.receipts.at(-1);
-  assert.equal(failure.reviewId, 'sanitization-failure'); assert.equal(failure.semanticReviewsHash, null);
+  assert.equal(failure.reviewId, 'sanitization-failure-v2-1'); assert.equal(failure.semanticReviewsHash, null);
   assert.equal(failure.outcome, 'sanitization-failed');
   async function inspect(dir) {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
@@ -221,6 +221,110 @@ test('V2 rejected semantic payload retains only fixed sanitized failure metadata
     }
   }
   await inspect(root);
+});
+
+for (const predecessor of ['chrome-semantic-review', 'deterministic-review']) {
+  for (const binding of ['activeBundleDigest', 'candidateBundleDigest']) {
+    test(`first semantic artifact cannot change ${binding} from ${predecessor}`, async t => {
+      const { store } = await fixture(t, { policy: loadReviewPolicy(2) });
+      if (predecessor === 'chrome-semantic-review') await enterChrome(store);
+      else for (const type of ['available', 'staged', 'deterministic-review']) await store.finalizeEvent(event(type));
+      const semanticReview = predecessor === 'chrome-semantic-review' ? chromeReceipt() : chromeReceipt({
+        coverageStatus: 'incomplete-input', availabilityStatus: 'not-checked', executionStatus: 'not-run', reasonCode: 'incomplete-input',
+        analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld',
+      });
+      semanticReview[binding] = 'f'.repeat(64);
+      const type = predecessor === 'chrome-semantic-review' ? 'eligible' : 'review-failed';
+      await assert.rejects(() => store.finalizeEvent({ ...event(type), [binding]: 'f'.repeat(64), semanticReview }), /schema|custody/i);
+      assert.equal((await store.verifyChain()).count, predecessor === 'chrome-semantic-review' ? 5 : 3);
+    });
+  }
+}
+
+test('Chrome entry cannot evade its artifact obligation with an intervening staged event', async t => {
+  const { store } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await enterChrome(store);
+  await assert.rejects(() => store.finalizeEvent(event('staged')), /schema|custody/i);
+  await assert.rejects(() => store.finalizeEvent(event('review-failed')), /schema|custody/i);
+  assert.equal((await store.verifyChain()).count, 5);
+});
+
+test('V2 sanitizer failure chooses an unused trusted identity across V1 and V2 history', async t => {
+  const { store, base } = await fixture(t);
+  const rejected = { ...event(), unexpected: 'REJECTED_PRIVATE_PAYLOAD' };
+  await assert.rejects(() => store.finalizeEvent(rejected), /sanitization/);
+  const old = (await store.verifyChain()).receipts[0];
+  assert.equal(old.reviewId, 'sanitization-failure');
+  const oldBytes = await readFile(path.join(old.directory, 'receipt.json'));
+  await store.finalizeEvent({ ...event(), reviewId: 'sanitization-failure-v2-1' });
+  const v2 = new ReceiptStore({ ...base, policy: loadReviewPolicy(2) });
+  for (const expected of ['sanitization-failure-v2-2', 'sanitization-failure-v2-3']) {
+    await assert.rejects(() => v2.finalizeEvent(rejected), /sanitization/);
+    const chain = await v2.verifyChain();
+    assert.equal(chain.state, 'intact');
+    assert.equal(chain.receipts.at(-1).reviewId, expected);
+    assert.equal(chain.receipts.at(-1).semanticReviewsHash, null);
+    assert.deepEqual(chain.receipts.at(-1).verifierIdentities, [{ name: 'sanitizer', version: '2' }]);
+  }
+  assert.equal((await v2.verifyChain()).count, 4);
+  assert.deepEqual(await readFile(path.join(old.directory, 'receipt.json')), oldBytes);
+});
+
+// Deliberately rebuild every local hash after a forged record edit. These cases
+// exercise cross-event custody, rather than passing on a stale checksum alone.
+async function rehashHistory(root, receipts, mutate) {
+  let previousReceiptHash = null;
+  for (let index = 0; index < receipts.length; index++) {
+    const directory = receipts[index].directory;
+    const receipt = JSON.parse(await readFile(path.join(directory, 'receipt.json')));
+    await chmod(directory, 0o700);
+    await mutate(receipt, directory, index);
+    const report = `# Local review receipt\n\nReview: ${receipt.reviewId}\n\nEvent: ${receipt.eventType}\n\nOutcome: ${receipt.outcome}\n\nCreated: ${receipt.createdAt}\n`;
+    const write = async (name, bytes) => { const file = path.join(directory, name); await chmod(file, 0o600); await writeFile(file, bytes); await chmod(file, 0o444); };
+    await write('report.md', report);
+    const hashes = {};
+    for (const name of ['report.md', 'attestation.json', ...(await readdir(path.join(directory, 'project'))).map(name => `project/${name}`)]) {
+      hashes[name] = createHash('sha256').update(await readFile(path.join(directory, name))).digest('hex');
+    }
+    receipt.projectEvidenceHash = sha256Json(hashes);
+    receipt.previousReceiptHash = previousReceiptHash;
+    await write('receipt.json', canonicalJson(receipt));
+    previousReceiptHash = sha256Json(receipt);
+    await write('receipt.sha256', `${previousReceiptHash}\n`);
+    await chmod(directory, 0o555);
+  }
+  await writeFile(path.join(root, '.custody-head'), canonicalJson({ count: receipts.length, tailHash: previousReceiptHash }));
+}
+
+test('verification rejects a first artifact whose rehashed terminal binding differs from Chrome entry', async t => {
+  const { store, root } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await enterChrome(store);
+  await store.finalizeEvent({ ...event('eligible'), semanticReview: chromeReceipt() });
+  const chain = await store.verifyChain(); assert.equal(chain.state, 'intact');
+  await rehashHistory(root, chain.receipts, async (receipt, directory, index) => {
+    if (index !== 5) return;
+    const artifact = chromeReceipt({ candidateBundleDigest: 'f'.repeat(64) });
+    const target = path.join(directory, semanticFile);
+    await chmod(target, 0o600); await writeFile(target, canonicalJson(artifact)); await chmod(target, 0o444);
+    receipt.candidateBundleDigest = artifact.candidateBundleDigest; receipt.semanticReviewsHash = sha256Json(artifact);
+  });
+  assert.equal((await store.verifyChain()).state, 'custody-broken');
+});
+
+test('verification remembers Chrome obligation through a fully rehashed staged then failed sequence', async t => {
+  const { store, root } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await enterChrome(store);
+  const semanticReview = chromeReceipt({ executionStatus: 'failed', reasonCode: 'timeout', analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' });
+  await store.finalizeEvent({ ...event('review-failed'), semanticReview });
+  await store.finalizeEvent(event('custody-broken'));
+  const chain = await store.verifyChain(); assert.equal(chain.state, 'intact');
+  await rehashHistory(root, chain.receipts, async (receipt, directory, index) => {
+    if (index < 5) return;
+    const semantic = path.join(directory, 'semantic-reviews');
+    await chmod(semantic, 0o700); await rm(path.join(directory, semanticFile)); await rm(semantic, { recursive: true });
+    receipt.eventType = index === 5 ? 'staged' : 'review-failed'; receipt.outcome = receipt.eventType; receipt.semanticReviewsHash = null;
+  });
+  assert.equal((await store.verifyChain()).state, 'custody-broken');
 });
 async function fixture(t, options = {}) {
   const project = await mkdtemp(path.join(tmpdir(), 'sidecar-custody-'));

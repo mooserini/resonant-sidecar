@@ -67,30 +67,59 @@ function assertReceipt(value, policy) {
   return receiptLayoutFor(policy, value);
 }
 
+function fixedFailure(policy, receipts) {
+  const failure = structuredClone(FIXED_FAILURE);
+  if (policy.schemaVersion === 2) {
+    const used = new Set(receipts.map(receipt => receipt.reviewId));
+    let index = 1;
+    while (used.has(`sanitization-failure-v2-${index}`)) index++;
+    failure.reviewId = `sanitization-failure-v2-${index}`;
+    failure.verifierIdentities = [{ name: 'sanitizer', version: '2' }];
+  }
+  return failure;
+}
+
+function assertSameReviewBinding(receipt, anchor) {
+  for (const key of ['reviewId', 'activeBundleDigest', 'candidateBundleDigest', 'policySnapshotHash']) schema(receipt[key] === anchor[key]);
+}
+
 function assertSemanticHistory(receipts) {
   let upgraded = false;
   const reviews = new Map();
   for (const receipt of receipts) {
     const v2 = receipt.policySnapshotHash === V2_POLICY_HASH;
     schema(v2 || !upgraded); upgraded ||= v2;
-    const prior = reviews.get(receipt.reviewId);
+    const state = reviews.get(receipt.reviewId) ?? { latest: null, pending: null, bound: null };
+    const prior = state.latest;
     if (prior) schema(prior.policySnapshotHash === receipt.policySnapshotHash);
     if (v2) {
-      if (prior?.semanticReviewsHash) {
-        schema(receipt.semanticReviewsHash === prior.semanticReviewsHash);
-        schema(canonicalJson(receipt.semanticReview) === canonicalJson(prior.semanticReview));
-      } else if (receipt.semanticReviewsHash !== null) {
-        schema(['eligible', 'review-failed'].includes(receipt.eventType));
-        const artifact = receipt.semanticReview;
-        const incomplete = prior?.eventType === 'deterministic-review' && receipt.eventType === 'review-failed' &&
-          artifact.coverageStatus === 'incomplete-input' && artifact.executionStatus === 'not-run' &&
-          artifact.reasonCode === 'incomplete-input' && artifact.eligibilityEffect === 'candidate-withheld';
-        schema(prior?.eventType === 'chrome-semantic-review' || incomplete);
-      } else if (prior?.eventType === 'chrome-semantic-review') {
-        schema(!['eligible', 'review-failed'].includes(receipt.eventType));
+      if (state.bound) {
+        schema(receipt.semanticReviewsHash === state.bound.semanticReviewsHash);
+        schema(canonicalJson(receipt.semanticReview) === canonicalJson(state.bound.semanticReview));
+      } else {
+        // Chrome entry creates an obligation that a later event cannot erase.
+        // This guards the artifact handoff, not the rest of the lifecycle graph.
+        if (state.pending) {
+          assertSameReviewBinding(receipt, state.pending);
+          schema(['eligible', 'review-failed', 'custody-broken'].includes(receipt.eventType));
+          if (receipt.semanticReviewsHash === null) schema(receipt.eventType === 'custody-broken');
+        }
+        if (receipt.semanticReviewsHash !== null) {
+          schema(['eligible', 'review-failed'].includes(receipt.eventType));
+          const artifact = receipt.semanticReview;
+          const incomplete = !state.pending && prior?.eventType === 'deterministic-review' && receipt.eventType === 'review-failed' &&
+            artifact.coverageStatus === 'incomplete-input' && artifact.executionStatus === 'not-run' &&
+            artifact.reasonCode === 'incomplete-input' && artifact.eligibilityEffect === 'candidate-withheld';
+          schema(state.pending ? prior?.eventType === 'chrome-semantic-review' : incomplete);
+          const anchor = state.pending ?? prior;
+          assertSameReviewBinding(receipt, anchor);
+          assertSameReviewBinding(artifact, anchor);
+          state.bound = receipt; state.pending = null;
+        } else if (receipt.eventType === 'chrome-semantic-review') state.pending = receipt;
       }
     }
-    reviews.set(receipt.reviewId, receipt);
+    state.latest = receipt;
+    reviews.set(receipt.reviewId, state);
   }
 }
 function directoryName(receipt) { return `${receipt.createdAt.replaceAll(':', '-')}_${receipt.reviewId}`; }
@@ -307,7 +336,7 @@ export class ReceiptStore {
       if (this.#policy.schemaVersion === 1 && chain.receipts.some(receipt => receipt.policySnapshotHash === V2_POLICY_HASH)) throw new CustodyError('policy downgrade');
       let sanitized; let rejected = false;
       try { sanitized = sanitizeEvidence(input, this.#policy); }
-      catch (error) { if (!(error instanceof SanitizationError)) throw error; sanitized = structuredClone(FIXED_FAILURE); rejected = true; }
+      catch (error) { if (!(error instanceof SanitizationError)) throw error; sanitized = fixedFailure(this.#policy, chain.receipts); rejected = true; }
       assertInput(sanitized, this.#policy);
       const receiptId = this.#safeUUID();
       if (chain.receipts.some(receipt => receipt.receiptId === receiptId)) throw new TypeError('Duplicate receipt ID');

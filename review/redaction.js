@@ -52,6 +52,8 @@ const PROHIBITED_VALUE = /(?:\b(?:bearer|basic)\s+\S+|(?:authorization|cookie|se
 
 const CHROME_FIELDS = `schemaVersion reviewerId evidenceKind reviewerRequirement provenanceKind modelIdentityAssurance inferenceBinding reviewId invocationId runtimeGeneration activeBundleDigest candidateBundleDigest policySnapshotHash inputDigest promptDigest schemaDigest adapterDigest coverageStatus availabilityStatus executionStatus reasonCode startedAt completedAt browserObservation componentObservation analysis analysisDigest eligibilityEffect`.split(' ');
 const CHROME_FAILURES = new Set(['api-absent', 'setup-required', 'setup-declined', 'unavailable', 'timeout', 'cancellation', 'panel-closure', 'browser-restart', 'connection-loss', 'incomplete-input', 'malformed-output', 'unfavorable-analysis', 'inconclusive-analysis', 'provenance-drift', 'sanitization-failure', 'custody-failure', 'terminal-receipt-interrupted']);
+const PREPARATION_FAILURES = new Set(['api-absent', 'setup-required', 'setup-declined', 'unavailable']);
+const INTERRUPTED_FAILURES = new Set(['timeout', 'cancellation', 'panel-closure', 'browser-restart', 'connection-loss', 'provenance-drift', 'sanitization-failure', 'custody-failure']);
 const FORBIDDEN_CLAIM = /(?:Gemini-attested|verified Gemini weights|cryptographic model attestation|independent proof|safe to activate)/i;
 // Bounded recognizable data/command forms, not a claim to detect arbitrary prose
 // copied from source or a prompt. Producers must never submit those raw inputs.
@@ -60,6 +62,36 @@ const CHROME_DIAGNOSTIC_OR_COMMAND = /(?:\b[A-Za-z]*(?:Error|Exception)\s*:|(?:^
 
 function semanticSchema(condition) { if (!condition) throw new SanitizationError(); }
 function semanticTimestamp(value) { return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
+
+function assertSemanticStatus(value) {
+  const { reasonCode, executionStatus, availabilityStatus, coverageStatus, analysis, eligibilityEffect } = value;
+  if (executionStatus === 'completed') {
+    semanticSchema(availabilityStatus === 'available' && coverageStatus === 'complete-input-supplied' && analysis !== null);
+    const expectedReason = { 'no-blocking-concern': null, 'blocking-concern': 'unfavorable-analysis', inconclusive: 'inconclusive-analysis' }[analysis.outcome];
+    semanticSchema(reasonCode === expectedReason && eligibilityEffect === (reasonCode === null ? 'prerequisite-satisfied' : 'candidate-withheld'));
+    return;
+  }
+  // No validated terminal inference exists in any non-completed failure. A
+  // failed callback, cleanup, binding or receipt cannot retain a favorable body.
+  semanticSchema(analysis === null && value.analysisDigest === null && eligibilityEffect === 'candidate-withheld');
+  if (reasonCode === 'incomplete-input') {
+    semanticSchema(coverageStatus === 'incomplete-input' && executionStatus === 'not-run' && availabilityStatus === 'not-checked');
+    return;
+  }
+  semanticSchema(coverageStatus === 'complete-input-supplied');
+  if (PREPARATION_FAILURES.has(reasonCode)) {
+    semanticSchema(availabilityStatus === reasonCode && executionStatus === 'not-run');
+  } else if (reasonCode === 'malformed-output') {
+    semanticSchema(availabilityStatus === 'available' && executionStatus === 'failed');
+  } else if (reasonCode === 'terminal-receipt-interrupted') {
+    semanticSchema(['available', 'not-checked'].includes(availabilityStatus) && executionStatus === 'failed');
+  } else {
+    // Before inference, cancellation/expiry can occur at any known availability
+    // state. An attempted inference requires the recorded available state.
+    semanticSchema(INTERRUPTED_FAILURES.has(reasonCode));
+    semanticSchema(executionStatus === 'not-run' || (executionStatus === 'failed' && availabilityStatus === 'available'));
+  }
+}
 
 /** Only trusted lifecycle code constructs this envelope; only analysis is model
  * output. The result binder checks supplied source membership; the lifecycle
@@ -100,17 +132,7 @@ export function sanitizeSemanticReview(input, policySnapshot) {
       const analysis = parseChromeAnalysis(canonicalJson(value.analysis), { suppliedFiles, suppliedLocations });
       semanticSchema(value.analysisDigest === sha256Json(analysis));
     }
-    const successful = value.executionStatus === 'completed' && value.analysis?.outcome === 'no-blocking-concern';
-    if (successful) semanticSchema(value.reasonCode === null && value.eligibilityEffect === 'prerequisite-satisfied');
-    else semanticSchema(CHROME_FAILURES.has(value.reasonCode) && value.eligibilityEffect === 'candidate-withheld');
-    if (value.executionStatus === 'completed') {
-      semanticSchema(value.availabilityStatus === 'available' && value.coverageStatus === 'complete-input-supplied');
-      if (!successful) semanticSchema(value.reasonCode === (value.analysis.outcome === 'blocking-concern' ? 'unfavorable-analysis' : 'inconclusive-analysis'));
-    }
-    if (value.coverageStatus === 'incomplete-input' || value.reasonCode === 'incomplete-input') semanticSchema(value.coverageStatus === 'incomplete-input' && value.reasonCode === 'incomplete-input' && value.executionStatus === 'not-run' && value.analysis === null);
-    if (value.reasonCode === 'unfavorable-analysis') semanticSchema(value.analysis?.outcome === 'blocking-concern');
-    if (value.reasonCode === 'inconclusive-analysis') semanticSchema(value.analysis?.outcome === 'inconclusive');
-    if (value.reasonCode === 'terminal-receipt-interrupted') semanticSchema(value.analysis === null && value.analysisDigest === null);
+    assertSemanticStatus(value);
     return value;
   } catch { throw new SanitizationError(); }
 }

@@ -84,10 +84,54 @@ test('semantic sanitization retains only exact trusted fields and detached analy
   await assert.rejects(() => sanitizeChrome({ ...chromeReceipt(), extra: true }), /sanitization/);
 });
 
-for (const reasonCode of ['api-absent', 'setup-required', 'setup-declined', 'unavailable', 'timeout', 'cancellation', 'panel-closure', 'browser-restart', 'connection-loss', 'malformed-output', 'provenance-drift', 'sanitization-failure', 'custody-failure', 'terminal-receipt-interrupted']) {
-  test(`semantic failure accepts fixed reason ${reasonCode} without fabricated analysis`, async () => {
-    const value = chromeReceipt({ executionStatus: 'failed', reasonCode, analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' });
-    assert.deepEqual(await sanitizeChrome(value), value);
+const availabilityStates = ['available', 'api-absent', 'setup-required', 'setup-declined', 'unavailable', 'not-checked'];
+// Independently declared producer contract, including every permitted pair.
+const interruptedPairs = [
+  ['available', 'failed'], ['available', 'not-run'], ['api-absent', 'not-run'],
+  ['setup-required', 'not-run'], ['setup-declined', 'not-run'], ['unavailable', 'not-run'], ['not-checked', 'not-run'],
+];
+const reasonRules = [
+  [null, [['available', 'completed']], 'complete-input-supplied', 'no-blocking-concern'],
+  ['api-absent', [['api-absent', 'not-run']], 'complete-input-supplied', null],
+  ['setup-required', [['setup-required', 'not-run']], 'complete-input-supplied', null],
+  ['setup-declined', [['setup-declined', 'not-run']], 'complete-input-supplied', null],
+  ['unavailable', [['unavailable', 'not-run']], 'complete-input-supplied', null],
+  ['timeout', interruptedPairs, 'complete-input-supplied', null],
+  ['cancellation', interruptedPairs, 'complete-input-supplied', null],
+  ['panel-closure', interruptedPairs, 'complete-input-supplied', null],
+  ['browser-restart', interruptedPairs, 'complete-input-supplied', null],
+  ['connection-loss', interruptedPairs, 'complete-input-supplied', null],
+  ['incomplete-input', [['not-checked', 'not-run']], 'incomplete-input', null],
+  ['malformed-output', [['available', 'failed']], 'complete-input-supplied', null],
+  ['unfavorable-analysis', [['available', 'completed']], 'complete-input-supplied', 'blocking-concern'],
+  ['inconclusive-analysis', [['available', 'completed']], 'complete-input-supplied', 'inconclusive'],
+  ['provenance-drift', interruptedPairs, 'complete-input-supplied', null],
+  ['sanitization-failure', interruptedPairs, 'complete-input-supplied', null],
+  ['custody-failure', interruptedPairs, 'complete-input-supplied', null],
+  ['terminal-receipt-interrupted', [['available', 'failed'], ['not-checked', 'failed']], 'complete-input-supplied', null],
+];
+test('API absence cannot retain an available failed inference with favorable analysis', async () => {
+  await assert.rejects(() => sanitizeChrome(chromeReceipt({ reasonCode: 'api-absent', availabilityStatus: 'available', executionStatus: 'failed', eligibilityEffect: 'candidate-withheld' })), /sanitization/);
+});
+for (const [reasonCode, pairs, coverage, outcome] of reasonRules) {
+  test(`semantic reason matrix ${reasonCode ?? 'success'} accepts only coherent retained evidence`, async () => {
+    let acceptedCount = 0;
+    for (const availabilityStatus of availabilityStates) for (const executionStatus of ['not-run', 'failed', 'completed']) {
+      for (const coverageStatus of ['complete-input-supplied', 'incomplete-input']) for (const analysisOutcome of [null, 'no-blocking-concern', 'blocking-concern', 'inconclusive']) {
+        const analysis = analysisOutcome === null ? null : {
+          schemaVersion: 2, outcome: analysisOutcome, summary: 'Bound source assessment.',
+          findings: analysisOutcome === 'blocking-concern' ? [{ severity: 'important', category: 'behavior', file: 'extension/sidepanel.js', location: null, explanation: 'The branch broadens access.' }] : [],
+        };
+        const value = chromeReceipt({ reasonCode, availabilityStatus, executionStatus, coverageStatus, analysis,
+          analysisDigest: analysis === null ? null : sha256Json(analysis), eligibilityEffect: reasonCode === null ? 'prerequisite-satisfied' : 'candidate-withheld' });
+        let accepted = false;
+        try { assert.deepEqual(await sanitizeChrome(value), value); accepted = true; } catch (error) { if (error.name !== 'SanitizationError') throw error; }
+        const expected = pairs.some(([availability, execution]) => availability === availabilityStatus && execution === executionStatus) && coverageStatus === coverage && analysisOutcome === outcome;
+        assert.equal(accepted, expected, JSON.stringify({ reasonCode, availabilityStatus, executionStatus, coverageStatus, analysisOutcome }));
+        if (accepted) acceptedCount++;
+      }
+    }
+    assert.equal(acceptedCount, pairs.length);
   });
 }
 
