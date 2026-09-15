@@ -1,4 +1,7 @@
-import { canonicalJson } from './canonical-json.js';
+import { canonicalJson, sha256Json } from './canonical-json.js';
+import { assertSupportedReviewPolicy } from './policy-registry.js';
+import { buildChromeProvenance } from './chrome-provenance.js';
+import { parseChromeAnalysis, snapshotChromeReviewValue } from './chrome-review-contract.js';
 
 export class SanitizationError extends Error {
   constructor() {
@@ -47,18 +50,90 @@ function assertContext(value, context) {
 }
 const PROHIBITED_VALUE = /(?:\b(?:bearer|basic)\s+\S+|(?:authorization|cookie|set-cookie)\s*:|\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?|mssql):\/\/|\b[a-z][a-z0-9+.-]*:\/\/[^\s/]+:[^\s/]+@|\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]+)|-----BEGIN [A-Z ]*PRIVATE KEY-----|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|\b[A-Z_][A-Z0-9_]*\s*=|(?:api[-_ ]?key|password|passwd|secret|access[-_]?token)\s*[:=]|\/(?:Users|home)\/|~\/)/i;
 
+const CHROME_FIELDS = `schemaVersion reviewerId evidenceKind reviewerRequirement provenanceKind modelIdentityAssurance inferenceBinding reviewId invocationId runtimeGeneration activeBundleDigest candidateBundleDigest policySnapshotHash inputDigest promptDigest schemaDigest adapterDigest coverageStatus availabilityStatus executionStatus reasonCode startedAt completedAt browserObservation componentObservation analysis analysisDigest eligibilityEffect`.split(' ');
+const CHROME_FAILURES = new Set(['api-absent', 'setup-required', 'setup-declined', 'unavailable', 'timeout', 'cancellation', 'panel-closure', 'browser-restart', 'connection-loss', 'incomplete-input', 'malformed-output', 'unfavorable-analysis', 'inconclusive-analysis', 'provenance-drift', 'sanitization-failure', 'custody-failure', 'terminal-receipt-interrupted']);
+const FORBIDDEN_CLAIM = /(?:Gemini-attested|verified Gemini weights|cryptographic model attestation|independent proof|safe to activate)/i;
+// Bounded recognizable data/command forms, not a claim to detect arbitrary prose
+// copied from source or a prompt. Producers must never submit those raw inputs.
+const CHROME_UNSAFE_TEXT = /(?:\b[a-z][a-z0-9+.-]*:\/\/|\b(?:https?|file|javascript|data):|(?:^|[\s"'(])\/[A-Za-z0-9_.-]+\/|[A-Za-z]:\\|```|`|\$\(|\b(?:rm|curl|wget|sudo|chmod|chown|bash|sh|node|npm|npx|python|osascript)\s+(?:--?\S|\/[\w.]|[\w.-]+\.(?:js|sh|py))|\b(?:const|let|var|function|import|export)\s+[\w{*]+\s*[=(;]|\b(?:SYSTEM|USER|ASSISTANT)\s*:)/i;
+const CHROME_DIAGNOSTIC_OR_COMMAND = /(?:\b[A-Za-z]*(?:Error|Exception)\s*:|(?:^|[;\n]|\b(?:run|execute)\s+)(?:rm|curl|wget|sudo|chmod|chown|bash|sh|npm|npx|osascript|touch|echo|printf|cat|whoami)\b)/i;
+
+function semanticSchema(condition) { if (!condition) throw new SanitizationError(); }
+function semanticTimestamp(value) { return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
+
+/** Only trusted lifecycle code constructs this envelope; only analysis is model
+ * output. The result binder checks supplied source membership; the lifecycle
+ * owner checks channel custody. Neither proves exact inference provenance. */
+export function sanitizeSemanticReview(input, policySnapshot) {
+  try {
+    const policy = assertSupportedReviewPolicy(snapshotChromeReviewValue(policySnapshot));
+    semanticSchema(policy.schemaVersion === 2);
+    const value = snapshotChromeReviewValue(input);
+    semanticSchema(value !== null && typeof value === 'object' && !Array.isArray(value));
+    semanticSchema(Object.keys(value).length === CHROME_FIELDS.length && Object.keys(value).every(key => CHROME_FIELDS.includes(key)));
+    function scan(item) {
+      if (typeof item === 'string') semanticSchema(!PROHIBITED_VALUE.test(item) && !FORBIDDEN_CLAIM.test(item) && !CHROME_UNSAFE_TEXT.test(item) && !CHROME_DIAGNOSTIC_OR_COMMAND.test(item) && !/[\u0000-\u001f\u007f]/.test(item));
+      else if (item !== null && typeof item === 'object') for (const child of Object.values(item)) scan(child);
+    }
+    scan(value);
+    semanticSchema(value.schemaVersion === 2 && value.reviewerId === 'chrome-language-model' && value.evidenceKind === 'semantic-analysis' && value.reviewerRequirement === 'required');
+    semanticSchema(value.provenanceKind === 'observed-local-components' && value.modelIdentityAssurance === 'not-attested' && value.inferenceBinding === 'not-established');
+    semanticSchema(typeof value.reviewId === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(value.reviewId));
+    semanticSchema(typeof value.invocationId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.invocationId));
+    semanticSchema(Number.isSafeInteger(value.runtimeGeneration) && value.runtimeGeneration >= 0);
+    for (const key of ['activeBundleDigest', 'candidateBundleDigest', 'policySnapshotHash', 'inputDigest', 'promptDigest', 'schemaDigest', 'adapterDigest']) semanticSchema(typeof value[key] === 'string' && /^[a-f0-9]{64}$/.test(value[key]));
+    semanticSchema(value.policySnapshotHash === sha256Json(policy));
+    semanticSchema(['complete-input-supplied', 'incomplete-input'].includes(value.coverageStatus));
+    semanticSchema(['available', 'api-absent', 'setup-required', 'setup-declined', 'unavailable', 'not-checked'].includes(value.availabilityStatus));
+    semanticSchema(['completed', 'failed', 'not-run'].includes(value.executionStatus));
+    semanticSchema(value.reasonCode === null || CHROME_FAILURES.has(value.reasonCode));
+    semanticSchema(semanticTimestamp(value.startedAt) && semanticTimestamp(value.completedAt) && Date.parse(value.startedAt) <= Date.parse(value.completedAt));
+    const provenance = buildChromeProvenance({ browserObservation: value.browserObservation, componentObservation: value.componentObservation });
+    for (const observed of [provenance.browserObservation.observedAt, provenance.componentObservation.observedAt]) semanticSchema(observed === null || Date.parse(observed) <= Date.parse(value.completedAt));
+    if (value.analysis === null) semanticSchema(value.analysisDigest === null && value.executionStatus !== 'completed');
+    else {
+      semanticSchema(value.executionStatus !== 'not-run' && Array.isArray(value.analysis?.findings));
+      // The full supplied evidence is intentionally not retained in receipts.
+      // Recheck the exact analysis schema; trusted binder owns file/hunk membership.
+      const suppliedFiles = [...new Set(value.analysis.findings.map(item => item.file))];
+      const suppliedLocations = [...new Map(value.analysis.findings.filter(item => item.location !== null).map(item => [JSON.stringify([item.file, item.location]), { file: item.file, location: item.location }])).values()];
+      const analysis = parseChromeAnalysis(canonicalJson(value.analysis), { suppliedFiles, suppliedLocations });
+      semanticSchema(value.analysisDigest === sha256Json(analysis));
+    }
+    const successful = value.executionStatus === 'completed' && value.analysis?.outcome === 'no-blocking-concern';
+    if (successful) semanticSchema(value.reasonCode === null && value.eligibilityEffect === 'prerequisite-satisfied');
+    else semanticSchema(CHROME_FAILURES.has(value.reasonCode) && value.eligibilityEffect === 'candidate-withheld');
+    if (value.executionStatus === 'completed') {
+      semanticSchema(value.availabilityStatus === 'available' && value.coverageStatus === 'complete-input-supplied');
+      if (!successful) semanticSchema(value.reasonCode === (value.analysis.outcome === 'blocking-concern' ? 'unfavorable-analysis' : 'inconclusive-analysis'));
+    }
+    if (value.coverageStatus === 'incomplete-input' || value.reasonCode === 'incomplete-input') semanticSchema(value.coverageStatus === 'incomplete-input' && value.reasonCode === 'incomplete-input' && value.executionStatus === 'not-run' && value.analysis === null);
+    if (value.reasonCode === 'unfavorable-analysis') semanticSchema(value.analysis?.outcome === 'blocking-concern');
+    if (value.reasonCode === 'inconclusive-analysis') semanticSchema(value.analysis?.outcome === 'inconclusive');
+    if (value.reasonCode === 'terminal-receipt-interrupted') semanticSchema(value.analysis === null && value.analysisDigest === null);
+    return value;
+  } catch { throw new SanitizationError(); }
+}
+
 export function sanitizeEvidence(value, policy) {
+  if (policy?.schemaVersion === 2) {
+    try { value = snapshotChromeReviewValue(value); } catch { throw new SanitizationError(); }
+  }
   const ancestors = new Set();
   let nodes = 0;
   function visit(item, depth = 0, key = '') {
     if (++nodes > 20000 || depth > 24) throw new SanitizationError();
+    if (key === 'semanticReview') {
+      if (depth !== 1 || policy?.schemaVersion !== 2) throw new SanitizationError();
+      return item === null ? null : sanitizeSemanticReview(item, policy);
+    }
     if (key !== 'checkRecord') assertContext(item, key);
     if (key === 'checkRecord' && (item === null || typeof item !== 'object' || Array.isArray(item))) throw new SanitizationError();
     if (key === 'checks' && !Array.isArray(item)) throw new SanitizationError();
     if (item === null || typeof item === 'boolean') return item;
     if (typeof item === 'number' && Number.isFinite(item)) return item;
     if (typeof item === 'string') {
-      if (item.length > 4000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(item) || PROHIBITED_VALUE.test(item)) throw new SanitizationError();
+      if (item.length > 4000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(item) || PROHIBITED_VALUE.test(item) || (policy?.schemaVersion === 2 && FORBIDDEN_CLAIM.test(item))) throw new SanitizationError();
       return item;
     }
     if (typeof item !== 'object' || ancestors.has(item)) throw new SanitizationError();
@@ -81,7 +156,7 @@ export function sanitizeEvidence(value, policy) {
       }
       const result = {};
       for (const [name, descriptor] of Object.entries(descriptors)) {
-        if (!FIELDS.has(name) || PROHIBITED_KEY.test(name)) throw new SanitizationError();
+        if ((!FIELDS.has(name) && !(policy?.schemaVersion === 2 && depth === 0 && ['semanticReview', 'semanticReviewsHash'].includes(name))) || PROHIBITED_KEY.test(name)) throw new SanitizationError();
         if ((name === 'argv' || name === 'command') && !Array.isArray(descriptor.value)) throw new SanitizationError();
         result[name] = visit(descriptor.value, depth + 1, name);
       }

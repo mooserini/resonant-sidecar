@@ -12,8 +12,11 @@ receipt; it would not rewrite or silently adopt those historical directories.
 ## Producer interface
 
 Construct `ReceiptStore` with an absolute, explicit project-local `review-receipts`
-root. It defaults to the exact `policy/review-policy.v1.json` snapshot and rejects
-different policies. Trusted adapters can inject `clock`, `randomUUID`, `rename`,
+root. It defaults to the exact `policy/review-policy.v1.json` snapshot. A trusted
+caller may select the exact registered V2 snapshot; altered/unknown snapshots
+are rejected. Readers validate every receipt against its own recorded policy,
+allowing an immutable V1 prefix followed by V2 reviews. Appending V1 after V2 or
+changing policy within a review is rejected. Trusted adapters can inject `clock`, `randomUUID`, `rename`,
 and `immutable` (an asynchronous function receiving the finalized directory).
 The default immutable adapter runs `/usr/bin/chflags -R -P uchg` on macOS only,
 explicitly refusing symbolic-link traversal.
@@ -30,7 +33,8 @@ explicitly refusing symbolic-link traversal.
   },
   osEvidence: { before, verification, after },
   attestation,       // optional; null until available, otherwise v1 schema
-  humanDecisionRef   // optional SHA-256 reference, never the decision nonce
+  humanDecisionRef,  // optional SHA-256 reference, never the decision nonce
+  semanticReview    // V2 only; optional exact trusted Chrome terminal envelope
 }
 ```
 
@@ -57,6 +61,11 @@ A sanitization rejection appends one fixed `review-failed` event with outcome
 It retains none of the input, including its review ID, and then rejects the call
 with a fixed `SanitizationError`. Schema failures reject without an append.
 Callers should not append a duplicate failure for a `SanitizationError`.
+That generic fallback cannot terminalize the original Chrome invocation: it
+retains no rejected binding fields. The trusted coordinator must sanitize the
+Chrome result before finalization and, when needed, construct a bound failure
+envelope from its own lifecycle state with null analysis/digest. It must never
+recover bindings from a rejected payload.
 
 ## Canonical bytes and layout
 
@@ -80,6 +89,8 @@ when its injected clock repeats or moves backward.
     before/evidence.json
     verification/evidence.json
     after/evidence.json
+  semantic-reviews/                  # V2 only, after Chrome terminal binding
+    chrome-language-model.json
   receipt.sha256
 ```
 
@@ -94,6 +105,72 @@ SHA-256; this binds all review prose without extending the policy receipt fields
 `osEvidenceHash` hashes the analogous map of all three OS files. No generated
 evidence file is omitted from the hash closure. `report.md` is generated from
 safe receipt metadata; callers cannot supply raw Markdown.
+
+### Version-selected Chrome evidence
+
+`receiptLayoutFor(recordedPolicy, eventRecord)` validates the frozen policy
+snapshot and exact event shape before selecting its allowed files/directories.
+V1 retains its original fields and bytes. V2 derives its event fields from the
+same recorded `receiptFields` plus `semanticReviewsHash`; neither approved
+policy file is rewritten. The V2 hash is SHA-256 of the exact canonical bytes of
+`semantic-reviews/chrome-language-model.json`, not a filename or current config.
+
+For available, staged, deterministic-review, codex-review and entry into
+chrome-semantic-review, the hash is null and the semantic-reviews directory is
+absent. The immediately following same-review eligible or review-failed event
+must atomically introduce the artifact. The sole earlier exception is
+review-failed immediately after deterministic-review for incomplete-input:
+coverage and reason are incomplete-input, execution is not-run, and eligibility
+is candidate-withheld. This records oversized evidence without running a model.
+Earlier failures in other prerequisites can have a null hash and no artifact.
+
+After binding, every later event for that review carries identical artifact
+bytes and hash. Omitting semanticReview from later producer input carries the
+verified artifact forward, including after restart. Explicit replacement or
+null rejects the append. Artifact/event review, bundle and policy bindings must
+match; later events cannot drop or change the bound artifact even if all local
+event hashes are recomputed. Full lifecycle transition authorization remains
+with the trusted coordinator.
+
+The artifact permits exactly the amendment's 28 fields:
+schemaVersion, reviewerId, evidenceKind, reviewerRequirement, provenanceKind,
+modelIdentityAssurance, inferenceBinding, reviewId, invocationId,
+runtimeGeneration, activeBundleDigest, candidateBundleDigest,
+policySnapshotHash, inputDigest, promptDigest, schemaDigest, adapterDigest,
+coverageStatus, availabilityStatus, executionStatus, reasonCode, startedAt,
+completedAt, browserObservation, componentObservation, analysis, analysisDigest,
+eligibilityEffect. Only analysis originates with the model. Every digest binding
+is required even for not-run/incomplete-input evidence. Runtime generation is
+a nonnegative safe integer; invocation identity uses the
+trusted request's 1–128 character ASCII letters/digits/dot/underscore/colon/hyphen
+contract and begins with a letter or digit. A valid completed
+analysis requires its matching digest; unavailable/invalid output uses null
+analysis and null digest. Terminal-receipt interruption always retains null
+analysis/digest and cannot reconstruct favorable model output.
+
+Fixed failure reasons are api-absent, setup-required, setup-declined,
+unavailable, timeout, cancellation, panel-closure, browser-restart,
+connection-loss, incomplete-input, malformed-output, unfavorable-analysis,
+inconclusive-analysis, provenance-drift, sanitization-failure, custody-failure,
+and terminal-receipt-interrupted. Transport reasons must be explicitly mapped
+to these codes by trusted lifecycle code. Success uses null reason and
+prerequisite-satisfied; failures use candidate-withheld. Availability is one of
+available, api-absent, setup-required, setup-declined, unavailable, not-checked;
+execution is completed, failed or not-run.
+
+Semantic sanitization rejects unknown fields, raw diagnostics, recognizable
+prompt/source/command/URL/path forms, and forbidden provenance/safety claims.
+It rechecks the exact analysis schema, honest allowlisted observations, timing,
+status consistency and digest binding. The result binder owns membership in
+the supplied source and hunk set, because raw source is not retained here.
+String scanning cannot prove the origin of innocuous prose or detect every
+semantic equivalent of a command. The envelope comes only from trusted code,
+the model gets only the analysis schema, and retained prose is never executable.
+
+Human readers should describe the result as Chrome on-device semantic analysis,
+observed browser provenance and observed model component metadata. Exact
+inference model identity is not attested; inference binding is not established.
+Hashes prove retained byte integrity, not semantic truth or inference origin.
 
 Finalization writes exclusive owner-only files under `.pending/<uuid>`, flushes
 files and directories, verifies schema/redaction/hash closure, advances the
@@ -111,7 +188,8 @@ There is no application API for modifying, deleting, or repairing old receipts.
 
 `verifyChain()` returns `{state: 'intact', count, tailHash, receipts}` or
 `{state: 'custody-broken', reason}`. Returned receipt objects additionally contain
-their `directory` and `receiptHash`. Readers and writers serialize through a
+their `directory` and `receiptHash`, and `semanticReview` when Chrome evidence
+is bound (the latter is not an extra on-disk event field). Readers and writers serialize through a
 local `.append-lock`; a concurrent or interrupted operation yields `busy` to
 verification and refuses appends. A stale lock is never automatically removed.
 

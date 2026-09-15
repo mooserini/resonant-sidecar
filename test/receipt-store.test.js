@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, chmod, rm, writeFile, stat, symlink, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, chmod, rm, writeFile, stat, symlink, rename, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { ReceiptStore } from '../review/receipt-store.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
+import { canonicalJson, sha256Json } from '../review/canonical-json.js';
+import { chromeReceipt } from './fixtures/chrome-receipt.js';
+import { sourceFixture } from './fixtures/semantic-source.js';
+import { buildSourceDiff } from '../review/source-diff.js';
+import { buildSemanticEvidence, buildChromeReviewRequest } from '../review/semantic-evidence.js';
+import { bindChromeReviewResult } from '../review/chrome-review.js';
 
 const digest = 'a'.repeat(64);
 function event(eventType = 'available') {
@@ -15,6 +22,206 @@ function event(eventType = 'available') {
     osEvidence: { before: {}, verification: {}, after: {} },
   };
 }
+
+const semanticFile = 'semantic-reviews/chrome-language-model.json';
+const goldenRoot = new URL('./fixtures/receipts/v1/review-receipts/', import.meta.url);
+async function goldenHashes() {
+  const readme = await readFile(new URL('./fixtures/receipts/v1/README.md', import.meta.url), 'utf8');
+  return [...readme.matchAll(/^([a-f0-9]{64})  review-receipts\/(.+)$/gm)].map(([, hash, name]) => [name, hash]);
+}
+async function assertGolden(root, { canonicalOnly = false } = {}) {
+  const hashes = await goldenHashes();
+  assert.equal(hashes.length, 28);
+  for (const [name, hash] of hashes) {
+    if (canonicalOnly && !name.startsWith('2026-')) continue;
+    assert.equal(createHash('sha256').update(await readFile(new URL(name, root))).digest('hex'), hash, name);
+  }
+}
+async function copyGolden(root) {
+  await cp(goldenRoot, root, { recursive: true });
+  await mkdir(path.join(root, '.pending'), { recursive: true });
+  async function seal(dir) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const target = path.join(dir, entry.name);
+      if (entry.isDirectory()) await seal(target); else await chmod(target, 0o444);
+    }
+    await chmod(dir, 0o555);
+  }
+  for (const name of await readdir(root)) if (name.startsWith('2026-')) await seal(path.join(root, name));
+}
+async function enterChrome(store) {
+  for (const type of ['available', 'staged', 'deterministic-review', 'codex-review', 'chrome-semantic-review']) await store.finalizeEvent(event(type));
+}
+
+test('retains actual Task 3 request and Task 4 result binding without changing generation or invocation types', async t => {
+  const files = await sourceFixture(t);
+  const policy = loadReviewPolicy(2);
+  const bindings = { activeBundleDigest: files.activeManifest.bundleDigest, candidateBundleDigest: files.candidateManifest.bundleDigest };
+  const common = buildSemanticEvidence({ reviewId: 'review-1', activeManifest: files.activeManifest, candidateManifest: files.candidateManifest, policy,
+    deterministic: { passed: true, checks: [], ...bindings, policySnapshotHash: sha256Json(policy) }, sourceDiff: await buildSourceDiff(files) });
+  const request = buildChromeReviewRequest({ ...common, invocationId: 'request:v2.test_1', runtimeGeneration: 0, adapterDigest: 'e'.repeat(64), deadline: '2026-09-14T12:01:00.000Z' });
+  const shape = chromeReceipt();
+  const { type, transportBinding: binding, ...result } = bindChromeReviewResult({ request, rawText: JSON.stringify(shape.analysis),
+    browserObservation: shape.browserObservation, componentObservation: shape.componentObservation, completedAt: '2026-09-14T12:00:30.000Z' });
+  assert.equal(type, 'ChromeReviewResult');
+  const semanticReview = chromeReceipt({ ...result, ...bindings, reviewId: binding.reviewId, invocationId: binding.invocationId, runtimeGeneration: binding.runtimeGeneration,
+    policySnapshotHash: binding.policyDigest, inputDigest: binding.inputDigest, promptDigest: binding.promptDigest, schemaDigest: binding.schemaDigest, adapterDigest: binding.adapterDigest,
+    startedAt: '2026-09-14T12:00:00.000Z' });
+  const { store } = await fixture(t, { policy, clock: () => new Date('2026-09-14T12:01:00.000Z') });
+  for (const kind of ['available', 'staged', 'deterministic-review', 'codex-review', 'chrome-semantic-review']) await store.finalizeEvent({ ...event(kind), ...bindings });
+  const receipt = await store.finalizeEvent({ ...event('eligible'), ...bindings, semanticReview });
+  assert.equal(receipt.semanticReview.runtimeGeneration, 0);
+  assert.equal(receipt.semanticReview.invocationId, 'request:v2.test_1');
+  assert.equal(receipt.semanticReview.inputDigest, request.transportBinding.inputDigest);
+  assert.equal((await store.verifyChain()).state, 'intact');
+});
+
+test('golden pre-V2 chain verifies without changing any historical bytes', async t => {
+  const { root, base } = await fixture(t);
+  await assertGolden(goldenRoot);
+  await copyGolden(root);
+  const chain = await new ReceiptStore({ ...base, policy: loadReviewPolicy(2) }).verifyChain();
+  assert.equal(chain.state, 'intact'); assert.equal(chain.count, 2);
+  assert.equal(chain.tailHash, 'c2a28877cf698c504739dd2f3089c14b0f128c66bc8dcbc1791e292fa650aeb5');
+  await assertGolden(new URL(`file://${root}/`));
+});
+
+test('V1 prefix remains byte-identical while V2 introduces then carries one terminal artifact', async t => {
+  const { root, base } = await fixture(t);
+  await copyGolden(root);
+  const store = new ReceiptStore({ ...base, policy: loadReviewPolicy(2) });
+  for (const type of ['available', 'staged', 'deterministic-review', 'codex-review', 'chrome-semantic-review']) {
+    const receipt = await store.finalizeEvent(event(type));
+    assert.equal(receipt.semanticReviewsHash, null);
+    await assert.rejects(() => stat(path.join(receipt.directory, 'semantic-reviews')), { code: 'ENOENT' });
+  }
+  const semanticReview = chromeReceipt();
+  const eligible = await store.finalizeEvent({ ...event('eligible'), semanticReview });
+  const bytes = await readFile(path.join(eligible.directory, semanticFile));
+  assert.equal(bytes.toString(), canonicalJson(semanticReview));
+  assert.equal(eligible.semanticReviewsHash, createHash('sha256').update(bytes).digest('hex'));
+  semanticReview.analysis.summary = 'Caller mutation must not alter retained evidence';
+  for (const type of ['human-accepted', 'activating', 'activation-failed', 'rolling-back', 'rolled-back']) {
+    const next = await new ReceiptStore({ ...base, policy: loadReviewPolicy(2) }).finalizeEvent(event(type));
+    assert.equal(next.semanticReviewsHash, eligible.semanticReviewsHash);
+    assert.deepEqual(await readFile(path.join(next.directory, semanticFile)), bytes);
+  }
+  const chain = await store.verifyChain();
+  assert.equal(chain.state, 'intact'); assert.equal(chain.count, 13);
+  for (const old of chain.receipts.slice(0, 2)) {
+    assert.equal(Object.hasOwn(old, 'semanticReviewsHash'), false);
+    await assert.rejects(() => stat(path.join(old.directory, 'semantic-reviews')), { code: 'ENOENT' });
+  }
+  await assertGolden(new URL(`file://${root}/`), { canonicalOnly: true });
+  await assertGolden(goldenRoot);
+});
+
+test('V2 terminal failure atomically introduces and seals the required artifact', async t => {
+  const { store } = await fixture(t, { policy: loadReviewPolicy(2), rename: async (from, to) => {
+    if (from.includes(`${path.sep}.pending${path.sep}`)) {
+      const receipt = JSON.parse(await readFile(path.join(from, 'receipt.json')));
+      if (receipt.eventType === 'review-failed') assert.equal(receipt.semanticReviewsHash, createHash('sha256').update(await readFile(path.join(from, semanticFile))).digest('hex'));
+    }
+    await rename(from, to);
+  } });
+  await enterChrome(store);
+  const semanticReview = chromeReceipt({ executionStatus: 'failed', reasonCode: 'timeout', analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' });
+  const receipt = await store.finalizeEvent({ ...event('review-failed'), semanticReview });
+  assert.equal(receipt.semanticReviewsHash, sha256Json(semanticReview));
+  assert.equal((await stat(path.join(receipt.directory, 'semantic-reviews'))).mode & 0o777, 0o555);
+  assert.equal((await stat(path.join(receipt.directory, semanticFile))).mode & 0o777, 0o444);
+  assert.equal((await store.verifyChain()).state, 'intact');
+});
+
+test('only the incomplete-input failure may bind before Chrome entry and all its digests remain required', async t => {
+  const { store } = await fixture(t, { policy: loadReviewPolicy(2) });
+  for (const type of ['available', 'staged', 'deterministic-review']) await store.finalizeEvent(event(type));
+  await assert.rejects(() => store.finalizeEvent({ ...event('eligible'), semanticReview: chromeReceipt() }));
+  const semanticReview = chromeReceipt({ coverageStatus: 'incomplete-input', availabilityStatus: 'not-checked', executionStatus: 'not-run', reasonCode: 'incomplete-input', analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' });
+  const receipt = await store.finalizeEvent({ ...event('review-failed'), semanticReview });
+  assert.equal(receipt.semanticReviewsHash, sha256Json(semanticReview));
+  assert.equal((await store.verifyChain()).state, 'intact');
+});
+
+test('V2 cannot omit the first terminal artifact or attach one at Chrome entry', async t => {
+  const { store } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await assert.rejects(() => store.finalizeEvent({ ...event('chrome-semantic-review'), semanticReview: chromeReceipt() }));
+  await enterChrome(store);
+  for (const type of ['eligible', 'review-failed']) await assert.rejects(() => store.finalizeEvent(event(type)), /semantic|schema|custody/i);
+  assert.equal((await store.verifyChain()).count, 5);
+});
+
+test('V2 cannot change or explicitly drop bound Chrome evidence, bundles or review policy', async t => {
+  const { store, base } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await enterChrome(store);
+  await store.finalizeEvent({ ...event('eligible'), semanticReview: chromeReceipt() });
+  const changed = chromeReceipt({ invocationId: 'another-invocation' });
+  for (const input of [
+    { ...event('human-accepted'), semanticReview: null },
+    { ...event('human-accepted'), semanticReview: changed },
+    { ...event('human-accepted'), candidateBundleDigest: 'f'.repeat(64) },
+  ]) await assert.rejects(() => store.finalizeEvent(input), /semantic|schema|custody/i);
+  await assert.rejects(() => new ReceiptStore({ ...base, policy: loadReviewPolicy(1) }).finalizeEvent(event('human-accepted')), /policy|custody/i);
+  assert.equal((await store.verifyChain()).count, 6);
+});
+
+for (const alteration of ['drop', 'missing-file', 'change', 'extra', 'null-hash', 'wrong-policy', 'symlink']) {
+  test(`V2 verification rejects ${alteration} semantic artifact even after event rehash`, async t => {
+    const { store, root } = await fixture(t, { policy: loadReviewPolicy(2) });
+    await enterChrome(store);
+    await store.finalizeEvent({ ...event('eligible'), semanticReview: chromeReceipt() });
+    // custody-broken permits null before Chrome: dropping its bound hash can be
+    // caught only by same-review history, not the standalone event layout.
+    const last = await store.finalizeEvent(event('custody-broken'));
+    const target = path.join(last.directory, semanticFile);
+    const receipt = JSON.parse(await readFile(path.join(last.directory, 'receipt.json')));
+    await chmod(path.dirname(target), 0o700);
+    if (alteration === 'drop') { await chmod(last.directory, 0o700); await rm(target); await rm(path.dirname(target), { recursive: true }); await chmod(last.directory, 0o555); receipt.semanticReviewsHash = null; }
+    if (alteration === 'missing-file') await rm(target);
+    if (alteration === 'change') { const changed = chromeReceipt({ invocationId: 'other-invocation' }); await chmod(target, 0o600); await writeFile(target, canonicalJson(changed)); await chmod(target, 0o444); receipt.semanticReviewsHash = sha256Json(changed); }
+    if (alteration === 'extra') await writeFile(path.join(path.dirname(target), 'extra.json'), '{}', { mode: 0o444 });
+    if (alteration === 'null-hash') receipt.semanticReviewsHash = null;
+    if (alteration === 'wrong-policy') receipt.policySnapshotHash = 'f'.repeat(64);
+    if (alteration === 'symlink') { await rm(target); await symlink('/etc/passwd', target); }
+    if (alteration !== 'drop') await chmod(path.dirname(target), 0o555);
+    for (const [name, bytes] of [['receipt.json', canonicalJson(receipt)], ['receipt.sha256', `${sha256Json(receipt)}\n`]]) {
+      const file = path.join(last.directory, name); await chmod(file, 0o600); await writeFile(file, bytes); await chmod(file, 0o444);
+    }
+    await writeFile(path.join(root, '.custody-head'), canonicalJson({ count: 7, tailHash: sha256Json(receipt) }));
+    assert.equal((await store.verifyChain()).state, 'custody-broken');
+  });
+}
+
+test('V2 ignores no semantic directories in pre-Chrome or historical V1 receipts', async t => {
+  for (const version of [1, 2]) {
+    const { store } = await fixture(t, { policy: loadReviewPolicy(version) });
+    const receipt = await store.finalizeEvent(event());
+    await chmod(receipt.directory, 0o700);
+    await mkdir(path.join(receipt.directory, 'semantic-reviews'), { mode: 0o555 });
+    await chmod(receipt.directory, 0o555);
+    assert.equal((await store.verifyChain()).state, 'custody-broken');
+  }
+});
+
+test('V2 rejected semantic payload retains only fixed sanitized failure metadata', async t => {
+  const { store, root } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await enterChrome(store);
+  const semanticReview = chromeReceipt(); semanticReview.rawPrompt = 'PAYLOAD_MUST_NEVER_SURVIVE';
+  await assert.rejects(() => store.finalizeEvent({ ...event('eligible'), semanticReview }), /sanitization/);
+  const chain = await store.verifyChain();
+  assert.equal(chain.state, 'intact'); assert.equal(chain.count, 6);
+  const failure = chain.receipts.at(-1);
+  assert.equal(failure.reviewId, 'sanitization-failure'); assert.equal(failure.semanticReviewsHash, null);
+  assert.equal(failure.outcome, 'sanitization-failed');
+  async function inspect(dir) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) await inspect(file);
+      else assert.doesNotMatch(await readFile(file, 'utf8'), /PAYLOAD_MUST_NEVER_SURVIVE|rawPrompt/);
+    }
+  }
+  await inspect(root);
+});
 async function fixture(t, options = {}) {
   const project = await mkdtemp(path.join(tmpdir(), 'sidecar-custody-'));
   const root = path.join(project, 'review-receipts');
