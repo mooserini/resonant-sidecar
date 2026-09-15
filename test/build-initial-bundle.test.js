@@ -57,6 +57,7 @@ for (const [name, source, pattern] of [
   ['bare static import', "import value from 'ambient-package';\n", /ambient|import graph/i],
   ['bare export-from', "export { value } from 'ambient-package';\n", /ambient|import graph/i],
   ['bare dynamic import', "await import('ambient-package');\n", /ambient|import graph/i],
+  ['fake node builtin', "import value from 'node:definitely-not-a-real-builtin';\n", /builtin|ambient|import graph/i],
   ['comment-separated static import', "import/* gap */ value from 'ambient-package';\n", /ambient|import graph/i],
   ['comment-separated dynamic import', "await import /* gap */ ('ambient-package');\n", /ambient|import graph/i],
   ['dynamic import inside a template interpolation', "const load = `${await import('ambient-package')}`;\n", /ambient|import graph/i],
@@ -83,6 +84,20 @@ test('trusted closure ignores import-shaped text in comments and string literals
     "import { readFile } from 'node:fs/promises';",
     "export function encode(value) { return Buffer.from(value, 'utf8'); }",
     'void message; void pattern; void template; void readFile; void encode;',
+    '',
+  ].join('\n');
+  assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);
+});
+
+test('trusted closure recognizes regex literals after control-flow conditions', async () => {
+  const files = repositoryFiles();
+  files['bootstrap/host.js'] = [
+    "if (true) /import\\('ambient-if-regex'\\)/.test('safe');",
+    "while (false) /import\\('ambient-while-regex'\\)/.test('safe');",
+    "for (; false;) /import\\('ambient-for-regex'\\)/.test('safe');",
+    "import { readFile } from 'node:fs/promises';",
+    "import test from 'node:test';",
+    'void readFile; void test;',
     '',
   ].join('\n');
   assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);

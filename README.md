@@ -88,8 +88,21 @@ adds a listener, capability, or Chrome permission.
 
 The bundle builder performs a declaration/capability comparison against the
 canonical policy; it does not claim to have compared live behavior. Its closed
-trusted import graph permits explicit `node:` built-ins and rejects ambient
-packages, unresolved relative imports, and non-literal dynamic imports.
+trusted import graph permits only explicit, runtime-recognized `node:` built-ins
+and rejects fake built-in names, ambient packages, unresolved relative imports,
+and non-literal dynamic imports.
+
+After an approved preparation, verify the sealed on-disk migration chain against
+the exact reviewed plan before opening Chrome Dev:
+
+```sh
+node scripts/verify-install-plan.js --stored-chain /tmp/resonant-sidecar-migration-plan.json
+```
+
+This command is read-only. It verifies the fixed receipt inventory, canonical
+bytes, sidecars, modes, file custody, predecessor chain, and exact install-plan
+binding. Any failure is a hard stop; keep the reviewed plan and
+`runtime/migration-receipts/CURRENT_HASH/` for collaborative diagnosis.
 
 See [docs/migration-runbook.md](docs/migration-runbook.md) for the exact human
 boundary, recovery procedure, process tree, and receipt locations.

@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { isBuiltin } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -108,10 +109,12 @@ function artifacts(snapshot, names) {
 
 function moduleTokens(source, name) {
   const tokens = [];
+  const parentheses = [];
   const identifierStart = character => /[A-Za-z_$]/.test(character ?? '');
   const identifierPart = character => /[A-Za-z0-9_$]/.test(character ?? '');
   const regexPrefix = new Set(['(', '[', '{', ',', ':', ';', '=', '!', '?', '&&', '||', '??', '=>', '+', '-', '*', '%', '&', '|', '^', '~', '<', '>']);
   const regexKeyword = new Set(['case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'return', 'throw', 'typeof', 'void', 'yield', 'await']);
+  const controlCondition = new Set(['if', 'while', 'for', 'with', 'switch', 'catch']);
   const failSyntax = detail => fail(`unparseable trusted module syntax at ${name}: ${detail}`);
 
   function stringToken(start, quote) {
@@ -159,7 +162,7 @@ function moduleTokens(source, name) {
 
   function canStartRegex() {
     const previous = tokens.at(-1);
-    return !previous || (previous.type === 'punct' && regexPrefix.has(previous.value)) || (previous.type === 'identifier' && regexKeyword.has(previous.value));
+    return !previous || (previous.type === 'punct' && (regexPrefix.has(previous.value) || previous.controlCondition === true)) || (previous.type === 'identifier' && regexKeyword.has(previous.value));
   }
 
   function templateLiteral(start) {
@@ -210,7 +213,13 @@ function moduleTokens(source, name) {
       }
       const pair = source.slice(index, index + 2);
       const value = ['&&', '||', '??', '=>'].includes(pair) ? pair : character;
-      tokens.push({ type: 'punct', value, start: index });
+      const punctuation = { type: 'punct', value, start: index };
+      if (value === '(') {
+        const previous = tokens.at(-1);
+        const isForAwait = previous?.type === 'identifier' && previous.value === 'await' && tokens.at(-2)?.type === 'identifier' && tokens.at(-2).value === 'for';
+        parentheses.push(previous?.type === 'identifier' && controlCondition.has(previous.value) || isForAwait);
+      } else if (value === ')') punctuation.controlCondition = parentheses.pop() === true;
+      tokens.push(punctuation);
       index += value.length;
     }
     if (stopAtBrace) failSyntax('unterminated template expression');
@@ -275,7 +284,10 @@ function assertClosedImports(snapshot, names) {
   for (const name of names.filter(value => value.endsWith('.js'))) {
     const source = snapshot.get(name).bytes.toString('utf8');
     for (const specifier of importSpecifiers(source, name)) {
-      if (specifier.startsWith('node:')) continue;
+      if (specifier.startsWith('node:')) {
+        if (!isBuiltin(specifier)) fail(`unknown Node builtin in trusted import graph at ${name}`);
+        continue;
+      }
       if (!specifier.startsWith('./') && !specifier.startsWith('../')) fail(`ambient import in trusted import graph at ${name}`);
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier));
       if (!allowed.has(resolved)) fail(`trusted import graph escapes at ${name}`);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { constants } from 'node:fs';
-import { lstat, open, readFile } from 'node:fs/promises';
+import { lstat, open, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -147,17 +147,82 @@ export function verifyInstallPlan(plan) {
   return plan;
 }
 
-async function main() {
-  const [planPath, ...rest] = process.argv.slice(2);
-  if (!planPath || rest.length) fail('expected exactly one absolute plan path');
+async function readStoredReceiptFile(file) {
+  const metadata = await lstat(file);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > MAX_FILE || (metadata.mode & 0o777) !== 0o400) fail('stored migration receipt custody');
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const held = await handle.stat();
+    if (held.dev !== metadata.dev || held.ino !== metadata.ino || held.size !== metadata.size) fail('stored migration receipt changed');
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    const current = await lstat(file);
+    if (after.dev !== metadata.dev || after.ino !== metadata.ino || after.size !== metadata.size || current.dev !== metadata.dev || current.ino !== metadata.ino || current.size !== metadata.size || bytes.length !== metadata.size) fail('stored migration receipt changed');
+    return bytes;
+  } finally { await handle.close(); }
+}
+
+function decodeCanonicalReceipt(bytes) {
+  let text; let value;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    value = JSON.parse(text);
+  } catch { fail('stored migration receipt JSON'); }
+  if (!plain(value) || `${canonicalJson(value)}\n` !== text) fail('stored migration receipt canonical bytes');
+  return value;
+}
+
+export async function verifyStoredMigrationChain(plan) {
+  verifyInstallPlan(plan);
+  const root = plan.paths.migrationReceipts;
+  absolute(root, 'stored migration receipt root');
+  const metadata = await lstat(root);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o700) fail('stored migration receipt root custody');
+  const directory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const held = await directory.stat();
+    if (held.dev !== metadata.dev || held.ino !== metadata.ino) fail('stored migration receipt root changed');
+    const expectedNames = ['after.json', 'after.sha256', 'before.json', 'before.sha256', 'migration.json', 'migration.sha256'];
+    const entries = await readdir(root, { withFileTypes: true });
+    const observedNames = entries.map(entry => entry.name).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+    if (canonicalJson(observedNames) !== canonicalJson(expectedNames) || entries.some(entry => !entry.isFile())) fail('stored migration receipt entries');
+    let previousReceiptHash = null;
+    for (const [name, eventType] of [['before', 'migration-before'], ['migration', 'migration-prepared'], ['after', 'migration-files-prepared']]) {
+      const body = await readStoredReceiptFile(path.join(root, `${name}.json`));
+      const sidecar = await readStoredReceiptFile(path.join(root, `${name}.sha256`));
+      if (!sidecar.equals(Buffer.from(`${sha256Bytes(body)}\n`, 'utf8'))) fail('stored migration receipt sidecar');
+      const receipt = decodeCanonicalReceipt(body);
+      const unsigned = { ...receipt }; delete unsigned.receiptHash;
+      if (receipt.eventType !== eventType || receipt.previousReceiptHash !== previousReceiptHash || receipt.receiptHash !== sha256Json(unsigned)) fail('stored migration receipt chain');
+      if (canonicalJson(receipt) !== canonicalJson(plan.receipts[name])) fail('stored migration receipt plan binding');
+      previousReceiptHash = receipt.receiptHash;
+    }
+    const after = await directory.stat();
+    const current = await lstat(root);
+    if (after.dev !== metadata.dev || after.ino !== metadata.ino || current.dev !== metadata.dev || current.ino !== metadata.ino || !current.isDirectory() || current.isSymbolicLink()) fail('stored migration receipt root changed');
+    return Object.freeze({ installHash: plan.installHash, receiptRoot: root, finalReceiptHash: previousReceiptHash });
+  } finally { await directory.close(); }
+}
+
+async function readReviewedPlan(planPath) {
   absolute(planPath, 'reviewed plan');
   const metadata = await lstat(planPath);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > MAX_FILE) fail('reviewed plan custody');
   let plan;
   try { plan = JSON.parse(await readFile(planPath, 'utf8')); }
   catch { fail('reviewed plan JSON'); }
+  return plan;
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const stored = args[0] === '--stored-chain';
+  const planPath = stored ? args[1] : args[0];
+  if (!planPath || args.length !== (stored ? 2 : 1)) fail('expected PLAN_PATH or --stored-chain PLAN_PATH');
+  const plan = await readReviewedPlan(planPath);
   verifyInstallPlan(plan);
-  process.stdout.write(`${plan.installHash}\n`);
+  if (stored) process.stdout.write(`${canonicalJson(await verifyStoredMigrationChain(plan))}\n`);
+  else process.stdout.write(`${plan.installHash}\n`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

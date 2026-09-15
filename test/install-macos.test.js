@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
+import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { VersionStore } from '../bootstrap/version-store.js';
 import { buildInstallPlan, inspectExecutable, migrateInstallation, parseInstallerArgs } from '../scripts/install-macos.js';
-import { inspectCurrentInstallation, verifyInstallPlan } from '../scripts/verify-install-plan.js';
+import { inspectCurrentInstallation, verifyInstallPlan, verifyStoredMigrationChain } from '../scripts/verify-install-plan.js';
 
 const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const COMMIT = 'b'.repeat(40);
@@ -54,6 +54,38 @@ function sourceInspection() {
     trustedBootstrap: { digest: sha256Json(trustedFiles.map(({ relativePath, sha256, mode }) => ({ path: relativePath, sha256, mode }))), files: trustedFiles },
     declarationComparison: { passed: true, checks: [{ name: 'v1-capabilities', passed: true }] },
   };
+}
+
+function fixturePlan(root, codexSha256 = '9'.repeat(64)) {
+  const homeDir = path.join(root, 'home');
+  const projectRoot = path.join(root, 'project');
+  const launcher = path.join(homeDir, 'Library/Application Support/Resonant Sidecar/native-host');
+  const manifest = path.join(homeDir, 'Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json');
+  const current = currentIdentity(launcher, manifest);
+  return buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir, projectRoot, nodePath: '/opt/node/bin/node', codexPath: '/opt/codex', codexExecutable: { ...codexIdentity('/opt/codex'), sha256: codexSha256 } });
+}
+
+async function writeStoredMigrationChain(plan) {
+  await mkdir(plan.paths.migrationReceipts, { recursive: true, mode: 0o700 });
+  for (const name of ['before', 'migration', 'after']) {
+    const body = `${canonicalJson(plan.receipts[name])}\n`;
+    await writeFile(path.join(plan.paths.migrationReceipts, `${name}.json`), body, { mode: 0o400 });
+    await writeFile(path.join(plan.paths.migrationReceipts, `${name}.sha256`), `${sha256Bytes(body)}\n`, { mode: 0o400 });
+  }
+}
+
+async function storedFixture(t) {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sidecar-stored-receipts-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const plan = fixturePlan(root);
+  await writeStoredMigrationChain(plan);
+  return { root, plan };
+}
+
+async function replaceSealed(file, body) {
+  await chmod(file, 0o600);
+  await writeFile(file, body);
+  await chmod(file, 0o400);
 }
 
 test('migration requires the exact explicit confirmation triple', () => {
@@ -185,6 +217,63 @@ test('reviewed plan file can be verified without executing or changing it', asyn
   assert.deepEqual([after.ino, after.size, after.mtimeMs], [before.ino, before.size, before.mtimeMs]);
 });
 
+test('stored migration chain verifier is read-only and bound to the exact reviewed plan', async t => {
+  const { root, plan } = await storedFixture(t);
+  const before = await Promise.all(['before.json', 'before.sha256', 'migration.json', 'migration.sha256', 'after.json', 'after.sha256'].map(async name => {
+    const info = await stat(path.join(plan.paths.migrationReceipts, name));
+    return [name, info.ino, info.size, info.mtimeMs, info.mode & 0o777];
+  }));
+  const result = await verifyStoredMigrationChain(plan);
+  assert.deepEqual(result, { installHash: plan.installHash, receiptRoot: plan.paths.migrationReceipts, finalReceiptHash: plan.receipts.after.receiptHash });
+  await assert.rejects(() => verifyStoredMigrationChain(fixturePlan(root, '8'.repeat(64))), /plan binding/i);
+  const planPath = path.join(root, 'reviewed-plan.json');
+  await writeFile(planPath, JSON.stringify(plan));
+  const { stdout } = await execFileAsync(process.execPath, [path.resolve('scripts/verify-install-plan.js'), '--stored-chain', planPath], { cwd: path.resolve('.') });
+  assert.deepEqual(JSON.parse(stdout), result);
+  const after = await Promise.all(['before.json', 'before.sha256', 'migration.json', 'migration.sha256', 'after.json', 'after.sha256'].map(async name => {
+    const info = await stat(path.join(plan.paths.migrationReceipts, name));
+    return [name, info.ino, info.size, info.mtimeMs, info.mode & 0o777];
+  }));
+  assert.deepEqual(after, before);
+});
+
+test('stored migration chain verifier rejects custody and chain substitution', async t => {
+  const cases = [
+    ['tampered receipt', async plan => replaceSealed(path.join(plan.paths.migrationReceipts, 'before.json'), `${canonicalJson({ ...plan.receipts.before, eventType: 'migration-tampered' })}\n`)],
+    ['noncanonical receipt bytes', async plan => replaceSealed(path.join(plan.paths.migrationReceipts, 'before.json'), `${JSON.stringify(plan.receipts.before, null, 2)}\n`)],
+    ['extra entry', async plan => writeFile(path.join(plan.paths.migrationReceipts, 'extra.json'), '{}\n', { mode: 0o400 })],
+    ['missing entry', async plan => unlink(path.join(plan.paths.migrationReceipts, 'after.sha256'))],
+    ['reordered receipts', async plan => {
+      const before = `${canonicalJson(plan.receipts.before)}\n`; const migration = `${canonicalJson(plan.receipts.migration)}\n`;
+      await replaceSealed(path.join(plan.paths.migrationReceipts, 'before.json'), migration);
+      await replaceSealed(path.join(plan.paths.migrationReceipts, 'before.sha256'), `${sha256Bytes(migration)}\n`);
+      await replaceSealed(path.join(plan.paths.migrationReceipts, 'migration.json'), before);
+      await replaceSealed(path.join(plan.paths.migrationReceipts, 'migration.sha256'), `${sha256Bytes(before)}\n`);
+    }],
+    ['predecessor substitution', async plan => {
+      const changed = { ...plan.receipts.after, previousReceiptHash: 'f'.repeat(64) };
+      delete changed.receiptHash; changed.receiptHash = sha256Json(changed);
+      const body = `${canonicalJson(changed)}\n`;
+      await replaceSealed(path.join(plan.paths.migrationReceipts, 'after.json'), body);
+      await replaceSealed(path.join(plan.paths.migrationReceipts, 'after.sha256'), `${sha256Bytes(body)}\n`);
+    }],
+    ['sidecar substitution', async plan => replaceSealed(path.join(plan.paths.migrationReceipts, 'after.sha256'), `${'f'.repeat(64)}\n`)],
+    ['permissive file mode', async plan => chmod(path.join(plan.paths.migrationReceipts, 'before.json'), 0o600)],
+    ['symlinked receipt', async plan => {
+      const target = path.join(plan.paths.migrationReceipts, 'after.json'); await unlink(target); await symlink(path.join(plan.paths.migrationReceipts, 'before.json'), target);
+    }],
+    ['hardlinked receipt', async plan => {
+      const target = path.join(plan.paths.migrationReceipts, 'after.json'); await unlink(target); await link(path.join(plan.paths.migrationReceipts, 'before.json'), target);
+    }],
+    ['permissive receipt directory', async plan => chmod(plan.paths.migrationReceipts, 0o755)],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, async subtest => {
+    const { plan } = await storedFixture(subtest);
+    await mutate(plan);
+    await assert.rejects(() => verifyStoredMigrationChain(plan), /stored migration|receipt|custody|chain|entry|mode|canonical|sidecar/i);
+  });
+});
+
 test('plan verifier rejects unproved registration and redirected artifact destinations', () => {
   const launcherPath = '/Users/example/Library/Application Support/Resonant Sidecar/native-host';
   const manifestPath = '/Users/example/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json';
@@ -270,6 +359,7 @@ test('explicit migration installs exact pinned bytes and preserves the prior V1 
   assert.equal(receipts[2].inventoryHash, plan.inventoryHash);
   assert.deepEqual(receipts[2].inventory, receipts[0].inventory);
   assert.ok(receipts[2].inventory.every(file => path.isAbsolute(file.destination) && Number.isInteger(file.mode)));
+  assert.equal((await verifyStoredMigrationChain(plan)).finalReceiptHash, receipts[2].receiptHash);
   t.after(async () => { await chmod(path.join(plan.paths.recovery, 'native-host'), 0o600).catch(() => {}); });
 });
 

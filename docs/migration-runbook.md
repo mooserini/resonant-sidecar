@@ -98,6 +98,23 @@ It is preparation provenance, not an update-review approval or behavioral proof.
 The bundle gate is likewise a declaration/capability comparison; real protocol
 and continuity behavior remains a Task 12 integration check.
 
+Before any Chrome Dev step, verify the prepared on-disk chain against the exact
+reviewed plan retained from the approval checkpoint:
+
+```sh
+node scripts/verify-install-plan.js --stored-chain /tmp/resonant-sidecar-migration-plan.json
+```
+
+The command is read-only. It requires the fixed `before`, `migration`, and
+`after` JSON/sidecar pairs; owner-only receipt-directory custody; sealed regular
+files with no symlinks or hardlinks; canonical JSON bytes; exact sidecar hashes;
+an intact predecessor chain; and exact registration, inventory, source, and
+install-hash binding to the structurally verified plan. Its JSON output names
+the install hash, receipt root, and final receipt hash. A failure is a hard stop:
+do not open or load the stable extension, do not change registration, and do not
+repair or delete evidence. Retain the reviewed plan and the named
+`runtime/migration-receipts/CURRENT_HASH/` directory for collaborative review.
+
 ## Human Chrome Dev steps
 
 After the preparation command reports `liveVerification: pending-human-checkpoint`:
