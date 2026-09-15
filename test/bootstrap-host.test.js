@@ -10,6 +10,8 @@ import { parseBootstrapMessage, runBootstrap } from '../bootstrap/host.js';
 import { NativeMessageDecoder, encodeNativeMessage } from '../native-host/native-framing.js';
 import { VersionStore } from '../bootstrap/version-store.js';
 import { runtimeFixture, decisionFor, consumer } from './fixtures/runtime.js';
+import { bridgeFixture, observations, NOW, RAW, until } from './fixtures/chrome-bridge.js';
+import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
 
 test('lifecycle is fixed and cannot smuggle decision or candidate paths to conversation child', () => {
   assert.equal(parseBootstrapMessage({ type: 'review.start' }).channel, 'lifecycle');
@@ -46,6 +48,54 @@ async function waitFor(predicate) {
   const deadline = Date.now() + 4000;
   while (!predicate()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 20)); }
 }
+
+for (const kind of ['result', 'cancel']) test(`native Chrome ${kind} settles busy review without entering conversation or starting another review`, async t => {
+  const f = await bridgeFixture(t, { runtimeGeneration: 1 }); const input = new PassThrough(); const output = new PassThrough(); const messages = []; const turns = []; let bound; let result; let starts = 0; let runtime;
+  const decoder = new NativeMessageDecoder(message => messages.push(message)); output.on('data', chunk => decoder.push(chunk));
+  runtime = await runBootstrap({ input, output, signals: new EventEmitter(), chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW },
+    store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: f.binding.activeDigest, reviewId: 'active' }) },
+    coordinator: { checkAvailability: async () => ({ state: 'available', reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest }),
+      startReview: async () => { starts++; bound = { ...f.binding, ...runtime.chromeReviewIdentity }; result = await runtime.requestChromeReview({ binding: bound, packet: f.packet, deadline: f.deadline }); return { state: 'review-failed', reviewId: bound.reviewId, candidateDigest: bound.candidateDigest }; }, acceptReview() {}, rejectReview() {} },
+    receiptStore: { verifyChain() { throw new Error('no navigation'); } }, presentation: { openReviewReport() {}, openChromeDeveloperProject() {} },
+    proxyFactory: () => ({ pid: 103, send: message => turns.push(message), close: async () => {} }),
+  });
+  t.after(() => runtime.close());
+  assert.equal(typeof runtime.requestChromeReview, 'function');
+  input.write(encodeNativeMessage({ type: 'turn.start', text: 'before' })); await until(() => turns.length);
+  input.write(encodeNativeMessage({ type: 'update.status' })); await until(() => messages.some(m => m.type === 'update.available'));
+  input.write(encodeNativeMessage({ type: 'review.start', reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest })); await until(() => messages.some(m => m.type === 'review.chromeReady'));
+  for (let i = 0; i < 12; i++) input.write(encodeNativeMessage({ type: 'review.start', reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest }));
+  input.write(encodeNativeMessage({ type: 'turn.start', text: 'during' }));
+  const message = kind === 'result' ? { type: 'review.chromeResult', ...bound, rawText: RAW, reasonCode: null, availabilityStatus: 'available', executionStatus: 'completed' } : { type: 'review.chromeCancel', ...bound, reasonCode: 'cancellation', availabilityStatus: 'available', executionStatus: 'failed' };
+  input.write(encodeNativeMessage(message)); await until(() => result);
+  assert.equal(result.type, kind === 'result' ? 'ChromeReviewResult' : 'ChromeReviewFailure');
+  assert.equal(runtime.chromeReviewJournal.recoveryState(), 'terminal-unreceipted'); assert.equal(starts, 1);
+  await until(() => turns.length === 2); assert.deepEqual(turns.map(m => m.text), ['before', 'during']);
+  input.write(encodeNativeMessage(message)); await new Promise(resolve => setImmediate(resolve)); assert.equal(starts, 1);
+});
+
+test('bootstrap mint returns only an unpredictable invocation ID without reserving a review or starting a proxy', async t => {
+  const f = await bridgeFixture(t); let starts = 0;
+  const runtime = await runBootstrap({ input: new PassThrough(), output: new PassThrough(), signals: new EventEmitter(), chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW },
+    store: { recover: async () => {}, bindRuntimeGuard() {} }, proxyFactory: () => { starts++; throw new Error('must not start'); },
+  });
+  try {
+    assert.equal(typeof runtime.mintChromeInvocation, 'function');
+    const first = runtime.mintChromeInvocation(); const second = runtime.mintChromeInvocation();
+    assert.match(first, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/); assert.notEqual(first, second);
+    assert.equal(runtime.chromeReviewJournal.recoveryState(), 'empty'); assert.equal(starts, 0);
+  } finally { await runtime.close(); }
+  assert.throws(() => runtime.mintChromeInvocation());
+});
+test('bootstrap recovers old pending invocation before attaching any native input listener', async t => {
+  const f = await bridgeFixture(t); const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: f.binding.restartId });
+  await journal.recover(); await journal.begin(f.binding);
+  const input = new PassThrough(); let recoveryChecked = false;
+  const runtime = await runBootstrap({ input, output: new PassThrough(), signals: new EventEmitter(), chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW },
+    store: { recover: async () => { assert.equal(input.listenerCount('data'), 0); const saved = JSON.parse(await readFile(path.join(f.projectRoot, 'runtime/chrome-review-pending.json'))); assert.equal(saved.reasonCode, 'interrupted-restart'); recoveryChecked = true; }, bindRuntimeGuard() {} },
+  });
+  assert.equal(recoveryChecked, true); assert.equal(runtime.chromeReviewJournal.recoveryState(), 'terminal-unreceipted'); await runtime.close();
+});
 
 test('long review dispatch never blocks normal turns or emergency interrupt', async () => {
   const input = new PassThrough(); const output = new PassThrough(); const sent = [];

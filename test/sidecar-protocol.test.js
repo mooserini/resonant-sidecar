@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { MAX_TURN_TEXT_BYTES, parseBrowserMessage } from '../native-host/sidecar-protocol.js';
 import * as protocol from '../native-host/sidecar-protocol.js';
+import { bridgeFixture, RAW } from './fixtures/chrome-bridge.js';
 
 const binding = { reviewId: 'review-1', candidateDigest: 'a'.repeat(64) };
 const decision = { ...binding, policyDigest: 'b'.repeat(64), nonce: 'n'.repeat(43) };
@@ -83,4 +84,25 @@ test('rejects empty, oversized, and unknown messages', () => {
     /too large/i,
   );
   assert.throws(() => parseBrowserMessage({ type: 'run.command' }), /unsupported/i);
+});
+
+test('busy lifecycle router dispatches only an exact Chrome settlement to the issued bridge', async t => {
+  const f = await bridgeFixture(t); let release; const started = new Promise(resolve => { release = resolve; }); let reviewing = false; const received = []; let starts = 0;
+  const router = protocol.createLifecycleRouter({
+    coordinator: { checkAvailability: async () => ({ state: 'available', ...binding }), startReview: async () => { starts++; reviewing = true; await started; return { state: 'review-failed', ...binding }; }, acceptReview() { throw new Error('must not grant'); }, rejectReview() { throw new Error('must not reject'); } },
+    receiptStore: { verifyChain() { throw new Error('must not navigate'); } }, presentation: { openReviewReport() {}, openChromeDeveloperProject() {} }, send() {},
+    chromeBridge: { handleSettlement(message) { received.push(message); return true; } },
+  });
+  await router.handle({ type: 'update.status' }); const pending = router.handle({ type: 'review.start', ...binding });
+  try {
+    assert.equal(reviewing, true);
+    for (const type of ['review.start', 'review.openReport', 'review.openDesktop']) await router.handle({ type, ...binding });
+    for (const type of ['review.accept', 'review.reject']) await router.handle({ type, ...decision });
+    await router.handle({ type: 'update.status' });
+    for (const key of ['path', 'tool', 'command', 'policy']) assert.throws(() => router.handle({ type: 'review.start', ...binding, [key]: 'untrusted' }));
+    assert.deepEqual(received, []);
+    const result = { type: 'review.chromeResult', ...f.binding, rawText: RAW, reasonCode: null, availabilityStatus: 'available', executionStatus: 'completed' };
+    await router.handle(result); assert.deepEqual(received, [result]); assert.equal(starts, 1);
+    router.close(); await router.handle(result); assert.equal(received.length, 1);
+  } finally { release(); await pending; router.close(); }
 });

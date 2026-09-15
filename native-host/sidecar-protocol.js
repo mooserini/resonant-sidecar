@@ -93,7 +93,7 @@ export function parseBrowserMessage(value) {
 // Instantiated ONLY by the trusted bootstrap. This adapter has no process,
 // filesystem, candidate, or policy authority: all effects go through the
 // constructor-bound Task 8 and Task 9 dependencies.
-export function createLifecycleRouter({ coordinator, receiptStore, presentation, send }) {
+export function createLifecycleRouter({ coordinator, receiptStore, presentation, send, chromeBridge = null }) {
   for (const [object, methods] of [[coordinator, ['checkAvailability', 'startReview', 'acceptReview', 'rejectReview']], [receiptStore, ['verifyChain']], [presentation, ['openReviewReport', 'openChromeDeveloperProject']]]) {
     if (!object || methods.some(k => typeof object[k] !== 'function')) throw new TypeError('Trusted lifecycle dependencies required');
   }
@@ -116,6 +116,9 @@ export function createLifecycleRouter({ coordinator, receiptStore, presentation,
   return Object.freeze({
     close() { closed = true; state = 'closed'; grant = rejection = binding = null; },
     handle(value) {
+      // Only the pinned constructor-bound bridge parses and settles this lane.
+      const settlementType = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'type')?.value : null;
+      if (settlementType === 'review.chromeResult' || settlementType === 'review.chromeCancel') return Promise.resolve(!closed && chromeBridge ? chromeBridge.handleSettlement(value) : false);
       const message = parseBrowserMessage(value); // snapshot before any await
       if (closed || busy) return Promise.resolve();
       const type = message.type;

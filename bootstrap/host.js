@@ -1,13 +1,18 @@
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { parseBrowserMessage, isLifecycleMessage, createLifecycleRouter } from '../native-host/sidecar-protocol.js';
 import { BoundedDecoder, QUEUE_LIMIT, startNativeProxy, writeFrame } from './native-proxy.js';
 import { snapshotDecision, snapshotRecoveryBinding } from './recovery-state.js';
 import { sha256Bytes } from '../review/canonical-json.js';
+import { ChromeReviewJournal } from './chrome-review-journal.js';
+import { ChromeReviewBridge, parseChromeSettlement } from '../review/chrome-review-bridge.js';
 
 // Requests contain no candidate text, decision nonce, command, or path. The
 // trusted coordinator will own review policy and human-decision validation.
 const LIFECYCLE = new Set(['review.status', 'review.start', 'review.open-report', 'review.continue-in-codex', 'review.dismiss']);
 export function parseBootstrapMessage(value) {
+  const settlement = parseChromeSettlement(value);
+  if (settlement) return { channel: 'chrome-settlement', message: settlement };
   const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'type') : null;
   if (descriptor && LIFECYCLE.has(descriptor.value) && Object.keys(value).length === 1) {
     if (Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 1 || !descriptor.enumerable) throw new Error('Unsupported lifecycle field');
@@ -18,11 +23,19 @@ export function parseBootstrapMessage(value) {
   return { channel: isLifecycleMessage(message) ? 'lifecycle' : 'conversation', message };
 }
 
-export async function runBootstrap({ store, nodePath, codexPath, workspace, userHome, codexHome, coordinator, receiptStore, presentation, resumeActivation = null, proxyFactory = startNativeProxy, input = process.stdin, output = process.stdout, signals = process }) {
+export async function runBootstrap({ store, nodePath, codexPath, workspace, userHome, codexHome, coordinator, receiptStore, presentation, chromeReview = null, resumeActivation = null, proxyFactory = startNativeProxy, input = process.stdin, output = process.stdout, signals = process }) {
   // Enabling visible lifecycle requires complete trusted presentation/custody
   // wiring. A conversation/recovery-only bootstrap keeps its Task 7/8 contract.
-  let lifecycle;
-  if (receiptStore !== undefined || presentation !== undefined) lifecycle = createLifecycleRouter({ coordinator, receiptStore, presentation, send: message => send(message) });
+  let lifecycle; let chromeBridge = null;
+  // Validate complete trusted lifecycle wiring before any recovery mutation.
+  // The late-bound narrow adapter cannot emit or settle until startup finishes.
+  if (receiptStore !== undefined || presentation !== undefined) lifecycle = createLifecycleRouter({ coordinator, receiptStore, presentation,
+    chromeBridge: { handleSettlement: message => chromeBridge?.handleSettlement(message) ?? false }, send: message => send(message) });
+  const channelId = randomUUID(), restartId = randomUUID();
+  const invocationIdFactory = chromeReview?.invocationIdFactory ?? randomUUID;
+  if (typeof invocationIdFactory !== 'function') throw new TypeError('Trusted invocation ID factory required');
+  const chromeJournal = chromeReview === null ? null : new ChromeReviewJournal({ projectRoot: chromeReview.projectRoot, restartId });
+  if (chromeJournal) await chromeJournal.recover();
   const resume = resumeActivation === null ? null : snapshotRecoveryBinding(resumeActivation);
   if (resume) await store.resumePendingActivation(resume);
   else await store.recover();
@@ -41,6 +54,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   const stopOwned = async () => {
     lazyStartAllowed = false;
     ++generation;
+    await chromeBridge?.cancelPending('connection-loss');
     for (const child of owned) { await child.close(); owned.delete(child); }
     proxy = null; runtimeState = null;
   };
@@ -56,16 +70,22 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
       throw error;
     }
   };
+  const chromeIdentity = () => stopped || !runtimeState ? null : Object.freeze({ channelId, restartId, runtimeGeneration: generation, activeDigest: runtimeState.digest });
+  chromeBridge = chromeJournal === null ? null : new ChromeReviewBridge({ journal: chromeJournal, send, currentChannel: chromeIdentity,
+    browserObservation: chromeReview.browserObservation, componentObservation: chromeReview.componentObservation, ...(chromeReview.clock === undefined ? {} : { clock: chromeReview.clock }) });
   store.bindRuntimeGuard(expected => !stopped && !refreshing && (!transitionBusy || leaseActive) && owned.size === 1 && owned.has(proxy) && refreshed?.pid === proxy.pid && refreshed?.decisionHash === expected.decisionHash && runtimeState?.digest === expected.digest && runtimeState?.reviewId === expected.reviewId && (expected.pid === undefined || expected.pid === runtimeState.pid) && (expected.threadId === undefined || expected.threadId === runtimeState.threadId));
   const close = () => {
     if (closePromise) return closePromise;
     stopped = true; input.pause();
     lifecycle?.close();
+    // Latch channel loss synchronously, even if the transition queue is busy.
+    const chromeClosed = chromeBridge?.close('connection-loss');
     refreshed = null;
     readyWait?.reject(new Error('Pending runtime refresh cancelled')); readyWait = null;
     closePromise = serialize(async () => {
       input.off('data', data); input.off('end', close); input.off('close', close); input.off('error', close);
       signals.off('SIGTERM', close); signals.off('SIGINT', close); signals.off('SIGHUP', close);
+      await chromeClosed;
       await stopOwned();
       // A disconnected pending runtime can never be completed. Restore the
       // prior verified pin after its process group has been reaped.
@@ -151,6 +171,13 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     let route;
     try { route = parseBootstrapMessage(value); }
     catch (error) { if (isLifecycleMessage(value)) { if (!lifecycle) lifecycleFailure(error); return; } throw error; }
+    if (route.channel === 'chrome-settlement') {
+      // This exact lane bypasses both lifecycle saturation and its busy gate.
+      // It never reaches coordinator.handle or the conversation proxy.
+      if (!stopped) chromeBridge?.handleSettlement(route.message);
+      return;
+    }
+    if (route.channel === 'conversation' && route.message.type === 'turn.interrupt') void chromeBridge?.cancelPending('emergency-stop');
     if (route.channel === 'lifecycle') {
       if (lifecyclePending >= 8) { if (!lifecycle) lifecycleFailure(); return; }
       ++lifecyclePending;
@@ -213,6 +240,19 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
     completeActivation(decision) { return store.completeActivation(decision); },
     get childPid() { return proxy?.pid ?? lastChildPid; },
     get runtimeState() { return runtimeState; },
+    get chromeReviewIdentity() { return chromeIdentity(); },
+    get chromeReviewJournal() { return chromeJournal; },
+    mintChromeInvocation() {
+      if (!chromeBridge || stopped) throw new Error('Chrome review unavailable');
+      const id = invocationIdFactory();
+      if (typeof id !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(id)) throw new Error('Invalid trusted invocation ID');
+      // Minting is not a reservation. Only the bridge's durable begin issues it.
+      return id;
+    },
+    requestChromeReview(request) {
+      if (!chromeBridge || stopped) return Promise.reject(new Error('Chrome review unavailable'));
+      return chromeBridge.request(request);
+    },
   };
 }
 

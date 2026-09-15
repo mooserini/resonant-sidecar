@@ -15,6 +15,7 @@ import { encodeNativeMessage } from '../native-host/native-framing.js';
 import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { collectMacOSEvidence } from '../review/macos-evidence.js';
 import { policy as osPolicy, runner } from './fixtures/macos/fixture.js';
+import { bridgeFixture, observations, NOW, RAW, until } from './fixtures/chrome-bridge.js';
 
 const policy = JSON.parse(readFileSync(new URL('../policy/review-policy.v1.json', import.meta.url)));
 const favorable = { schemaVersion: 1, verdict: 'favorable', summary: 'No policy concerns', behavioralDifferences: [], dependencyChanges: [], unexplainedFiles: [], policyConcerns: [] };
@@ -211,4 +212,47 @@ for (const failure of ['proxy-send', 'framing']) test(`actual ${failure} failure
   assert.equal(f.bootstrap.runtimeState, null);
   assert.deepEqual(f.reaped, ['first']);
   assert.deepEqual(f.turns, []);
+});
+
+test('native disconnect invalidates an emitted Chrome invocation before late result can settle it', async t => {
+  const f = await bridgeFixture(t, { runtimeGeneration: 1 }); const input = new PassThrough(); let reaped = false;
+  const runtime = await runBootstrap({ input, output: new PassThrough(), signals: new EventEmitter(),
+    chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW },
+    store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: f.binding.activeDigest, reviewId: 'active' }) },
+    proxyFactory: () => ({ pid: 103, send() {}, close: async () => { reaped = true; } }),
+  });
+  t.after(() => runtime.close()); assert.equal(typeof runtime.requestChromeReview, 'function');
+  input.write(encodeNativeMessage({ type: 'turn.start', text: 'ordinary' })); await until(() => runtime.runtimeState);
+  const binding = { ...f.binding, ...runtime.chromeReviewIdentity };
+  const pending = runtime.requestChromeReview({ binding, packet: f.packet, deadline: f.deadline });
+  await until(() => runtime.chromeReviewJournal.recoveryState() === 'pending');
+  const closing = runtime.close();
+  input.write(encodeNativeMessage({ type: 'review.chromeResult', ...binding, rawText: RAW, reasonCode: null, availabilityStatus: 'available', executionStatus: 'completed' }));
+  assert.equal((await pending).reasonCode, 'connection-loss'); await closing;
+  assert.equal(reaped, true); assert.equal(runtime.chromeReviewJournal.snapshot().reasonCode, 'connection-loss');
+});
+
+for (const action of ['generation-change', 'emergency-stop']) test(`${action} aborts Chrome immediately while preserving ordinary runtime ownership`, async t => {
+  const f = await bridgeFixture(t, { runtimeGeneration: 1 }); const input = new PassThrough(); const turns = [];
+  const runtime = await runBootstrap({ input, output: new PassThrough(), signals: new EventEmitter(), chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW },
+    store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: f.binding.activeDigest, reviewId: 'active' }) },
+    proxyFactory: () => ({ pid: 103, send: message => turns.push(message), close: async () => {} }),
+  });
+  t.after(() => runtime.close()); input.write(encodeNativeMessage({ type: 'turn.start', text: 'ordinary' })); await until(() => runtime.runtimeState);
+  const binding = { ...f.binding, ...runtime.chromeReviewIdentity }; const pending = runtime.requestChromeReview({ binding, packet: f.packet, deadline: f.deadline });
+  await until(() => runtime.chromeReviewJournal.recoveryState() === 'pending');
+  let settled = false; pending.then(() => { settled = true; });
+  if (action === 'generation-change') {
+    await runtime.stopCandidate();
+    const settledBeforeReturn = settled;
+    if (!settledBeforeReturn) { await runtime.close(); await pending; }
+    assert.equal(settledBeforeReturn, true, 'runtime transition cannot return with its Chrome invocation pending');
+  } else {
+    input.write(encodeNativeMessage({ type: 'turn.interrupt' }));
+    input.write(encodeNativeMessage({ type: 'review.chromeResult', ...binding, rawText: RAW, reasonCode: null, availabilityStatus: 'available', executionStatus: 'completed' }));
+  }
+  const result = await pending;
+  assert.equal(result?.reasonCode, action === 'generation-change' ? 'connection-loss' : 'emergency-stop');
+  assert.equal(runtime.runtimeState === null, action === 'generation-change');
+  if (action === 'emergency-stop') { await until(() => turns.length === 2); assert.equal(turns[1].type, 'turn.interrupt'); }
 });
