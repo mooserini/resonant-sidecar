@@ -87,7 +87,7 @@ test('semantic sanitization retains only exact trusted fields and detached analy
 const availabilityStates = ['available', 'api-absent', 'setup-required', 'setup-declined', 'unavailable', 'not-checked'];
 // Independently declared producer contract, including every permitted pair.
 const interruptedPairs = [
-  ['available', 'failed'], ['available', 'not-run'], ['api-absent', 'not-run'],
+  ['available', 'failed'], ['not-checked', 'failed'], ['available', 'not-run'], ['api-absent', 'not-run'],
   ['setup-required', 'not-run'], ['setup-declined', 'not-run'], ['unavailable', 'not-run'], ['not-checked', 'not-run'],
 ];
 const reasonRules = [

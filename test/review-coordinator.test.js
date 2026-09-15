@@ -15,6 +15,11 @@ import { policy as osPolicy, runner } from './fixtures/macos/fixture.js';
 import { runBootstrap } from '../bootstrap/host.js';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { loadReviewPolicy } from '../review/policy-registry.js';
+import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { ChromeReviewBridge } from '../review/chrome-review-bridge.js';
+import { CHANNEL, RESTART, OTHER, NOW, RAW, observations } from './fixtures/chrome-bridge.js';
+import { createLifecycleRouter } from '../native-host/sidecar-protocol.js';
 
 const policy = JSON.parse(readFileSync(new URL('../policy/review-policy.v1.json', import.meta.url)));
 const favorable = { schemaVersion: 1, verdict: 'favorable', summary: 'No policy concerns', behavioralDifferences: [], dependencyChanges: [], unexplainedFiles: [], policyConcerns: [] };
@@ -25,11 +30,12 @@ async function completionLedger(f, first, staged, binding) {
   return { receipts, finalize: osEvidence => receipts.finalizeEvent(event('activated', osEvidence)) };
 }
 async function coordinatorFixture(t, options = {}) {
+  const fixturePolicy = options.policy ?? policy;
   const f = await runtimeFixture(t); const first = await f.stage('first');
   const baseline = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
   await baseline.installVersion(first); await baseline.activate(decisionFor(first)); await baseline.completeActivation(decisionFor(first));
-  const staged = await f.stage('review-1', '// B candidate');
-  const receiptStore = new ReceiptStore({ root: path.join(f.projectRoot, 'review-receipts'), immutable: async () => {} });
+  const staged = await f.stage('review-1', options.largeSource ? '// '.repeat(60000) : '// B candidate');
+  const receiptStore = new ReceiptStore({ root: path.join(f.projectRoot, 'review-receipts'), policy: fixturePolicy, immutable: async () => {} });
   const nonceStore = new DecisionNonces({ root: f.root });
   const effects = []; let coordinator; let runtimeState = { digest: first.manifest.bundleDigest, reviewId: 'first', pid: 103, threadId: 'thread-1' };
   const versionStore = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: d => coordinator.consumeDecision(d), verifyConsumedDecision: b => coordinator.verifyConsumedDecision(b) });
@@ -37,12 +43,12 @@ async function coordinatorFixture(t, options = {}) {
   const deps = {
     receiptStore, nonceStore, versionStore, policy, reviewId: () => 'review-1',
     candidateSource: { inspect: async () => ({ state: 'available', manifest: staged.manifest }), stage: async () => staged },
-    deterministicReview: async () => ({ passed: true, checks: [{ name: 'trusted-tests', passed: true }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) }),
+    deterministicReview: async () => ({ passed: true, checks: [{ name: 'trusted-tests', passed: true }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, policySnapshotHash: sha256Json(fixturePolicy) }),
     codexReview: async input => {
       effects.push('codex');
       const identity = { pid: 105, executablePath: '/usr/bin/true', executableSha256: sha256Bytes(readFileSync('/usr/bin/true')) };
       const binding = await input.sampleVerifier(identity);
-      const result = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, outputDigest: sha256Json(favorable), verifierIdentities: [{ name: 'codex-executable', sha256: 'c'.repeat(64) }, { name: 'codex-version', sha256: 'd'.repeat(64) }, { name: 'codex-process-evidence', sha256: sha256Json(binding) }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) };
+      const result = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, outputDigest: sha256Json(favorable), verifierIdentities: [{ name: 'codex-executable', sha256: 'c'.repeat(64) }, { name: 'codex-version', sha256: 'd'.repeat(64) }, { name: 'codex-process-evidence', sha256: sha256Json(binding) }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, policySnapshotHash: sha256Json(fixturePolicy) };
       await input.finalizeResult(result); return result;
     },
     collectEvidence: input => collectMacOSEvidence({ ...input, runner: runner().run }),
@@ -64,7 +70,7 @@ async function coordinatorFixture(t, options = {}) {
       restartPrevious: async () => { effects.push('restore'); const active = await deps.versionStore.resolveActiveHost(); runtimeState = { digest: active.digest, reviewId: active.reviewId, pid: 103, threadId: 'thread-1' }; return { ...runtimeState }; },
     }, ...options,
   };
-  coordinator = new ReviewCoordinator(deps);
+  coordinator = options.deferCoordinator ? null : new ReviewCoordinator(deps);
   return { ...f, first, staged, receiptStore, nonceStore, versionStore, coordinator, deps, effects,
     current: () => coordinator,
     restart: (nonces = new DecisionNonces({ root: f.root })) => { coordinator = new ReviewCoordinator({ ...deps, nonceStore: nonces }); return coordinator; },
@@ -80,6 +86,357 @@ test('coordinator grants eligibility only with one live verifier sample bound to
   const codexReceipt = chain.receipts.find(receipt => receipt.eventType === 'codex-review');
   const osEvidence = JSON.parse(await readFile(path.join(codexReceipt.directory, 'os/verification/evidence.json')));
   assert.equal(osEvidence.processes.find(process => process.name === 'verifier').pid, 105);
+});
+
+async function chromeCoordinatorFixture(t, options = {}) {
+  const f = await coordinatorFixture(t, { policy: loadReviewPolicy(2), deferCoordinator: true, ...options });
+  const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: RESTART });
+  await journal.recover();
+  let context = { channelId: CHANNEL, restartId: RESTART, runtimeGeneration: 3, activeDigest: f.first.manifest.bundleDigest, adapterDigest: 'a'.repeat(64), ...observations };
+  let ready; let signalReady;
+  const requested = new Promise(resolve => { signalReady = resolve; });
+  const bridge = new ChromeReviewBridge({ journal, send: message => { ready = message; signalReady(message); }, currentChannel: () => context, clock: () => NOW, ...observations });
+  t.after(() => bridge.close('connection-loss'));
+  const issued = [];
+  const issue = f.nonceStore.issue.bind(f.nonceStore);
+  f.nonceStore.issue = (...args) => { issued.push(args[0]); return issue(...args); };
+  Object.assign(f.deps, {
+    chromeJournal: journal, chromeContext: () => structuredClone(context), clock: () => NOW,
+    mintChromeInvocation: () => 'invocation-review-1', chromeReview: request => bridge.request(request),
+    chromeReviewStatus: binding => bridge.status(binding), completeChromeReview: binding => bridge.complete(binding),
+  });
+  const c = new ReviewCoordinator(f.deps);
+  return { ...f, coordinator: c, journal, bridge, issued,
+    context: value => { context = { ...context, ...value }; },
+    ready: () => ready,
+    waitChrome: work => Promise.race([requested, work.then(result => { throw new Error(`Review ended before Chrome: ${result.state}`); })]),
+    settle: (reasonCode = null, extra = {}) => { const { type, packet, ...binding } = ready; return bridge.handleSettlement({ type: 'review.chromeResult', ...binding, rawText: reasonCode === null ? RAW : null, reasonCode, availabilityStatus: reasonCode ?? 'available', executionStatus: reasonCode === null ? 'completed' : 'not-run', ...extra }); },
+    artifact: async () => (await f.receiptStore.verifyChain()).receipts.findLast(r => r.semanticReview)?.semanticReview,
+  };
+}
+
+test('V2 withholds both nonces until Chrome terminal cleanup, permanent reread and journal mark', async t => {
+  const f = await chromeCoordinatorFixture(t);
+  let codexEvidence;
+  const codex = f.deps.codexReview;
+  f.deps.codexReview = input => { codexEvidence = structuredClone(input.evidence); return codex(input); };
+  const c = new ReviewCoordinator(f.deps);
+  const work = c.startReview(); await f.waitChrome(work);
+  assert.equal(c.state, 'chrome-semantic-review'); assert.equal(f.issued.length, 0);
+  assert.deepEqual(f.ready().packet.evidence, codexEvidence);
+  assert.equal(f.ready().packet.evidence.deterministic.checks.some(check => check.name === 'codex-result'), false);
+  const mark = f.journal.markReceipted.bind(f.journal);
+  f.journal.markReceipted = async hash => {
+    const retained = (await f.receiptStore.verifyChain()).receipts.at(-1);
+    assert.equal(retained.receiptHash, hash);
+    assert.equal(retained.semanticReview.analysisDigest, sha256Json(JSON.parse(RAW)));
+    assert.equal(f.issued.length, 0); await mark(hash);
+  };
+  assert.equal(f.settle(), true);
+  const e = await work;
+  assert.equal(e.state, 'eligible'); assert.equal(f.issued.length, 2);
+  assert.equal(f.journal.recoveryState(), 'receipted');
+  assert.deepEqual(await f.events(), ['available', 'staged', 'deterministic-review', 'codex-review', 'chrome-semantic-review', 'eligible']);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+  assert.equal(f.settle(), false);
+});
+
+for (const reason of ['api-absent', 'setup-required', 'setup-declined', 'unavailable', 'timeout', 'connection-loss', 'malformed-output', 'provenance-drift', 'custody-failure', 'cancellation', 'panel-closure', 'emergency-stop', 'unfavorable-analysis', 'inconclusive-analysis']) {
+  test(`V2 ${reason} finalizes candidate-withheld and cannot consume a forged human choice`, async t => {
+    const f = await chromeCoordinatorFixture(t); const work = f.coordinator.startReview(); await f.waitChrome(work);
+    if (['cancellation', 'panel-closure', 'emergency-stop'].includes(reason)) {
+      const { type, packet, ...binding } = f.ready();
+      assert.equal(f.bridge.handleSettlement({ type: 'review.chromeCancel', ...binding, reasonCode: reason, availabilityStatus: 'available', executionStatus: 'failed' }), true);
+    } else if (reason.endsWith('-analysis')) {
+      f.settle(null, { rawText: JSON.stringify({ schemaVersion: 2, outcome: reason === 'unfavorable-analysis' ? 'blocking-concern' : 'inconclusive', summary: 'Candidate withheld.', findings: reason === 'unfavorable-analysis' ? [{ severity: 'important', category: 'behavior', file: 'native-host/host.js', location: null, explanation: 'The changed behavior warrants review.' }] : [] }) });
+    } else f.settle(reason, ['api-absent', 'setup-required', 'setup-declined', 'unavailable'].includes(reason) ? {} : { availabilityStatus: 'available', executionStatus: 'failed' });
+    const result = await work; assert.equal(result.state, 'review-failed'); assert.equal(f.issued.length, 0);
+    const artifact = await f.artifact();
+    assert.equal(artifact.reasonCode, reason === 'emergency-stop' ? 'cancellation' : reason);
+    assert.equal(artifact.eligibilityEffect, 'candidate-withheld'); assert.equal(f.journal.recoveryState(), 'receipted');
+    assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+    for (const action of ['accept', 'reject']) await assert.rejects(() => f.coordinator[action === 'accept' ? 'acceptReview' : 'rejectReview']({ action, reviewId: result.reviewId, candidateDigest: result.candidateDigest, policyDigest: sha256Json(f.deps.policy), nonce: 'n'.repeat(43) }), /state/);
+  });
+}
+
+test('V2 oversized complete evidence branches before Codex and Chrome with a trusted incomplete artifact', async t => {
+  const f = await chromeCoordinatorFixture(t, { largeSource: true });
+  const result = await f.coordinator.startReview();
+  assert.equal(result.state, 'review-failed'); assert.equal(f.ready(), undefined);
+  assert.deepEqual(f.effects, []); assert.equal(f.issued.length, 0); assert.equal(f.journal.recoveryState(), 'empty');
+  const artifact = await f.artifact();
+  assert.equal(artifact.reasonCode, 'incomplete-input'); assert.equal(artifact.coverageStatus, 'incomplete-input');
+  assert.equal(artifact.executionStatus, 'not-run'); assert.equal(artifact.analysis, null);
+  assert.deepEqual(await f.events(), ['available', 'staged', 'deterministic-review', 'review-failed']);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+for (const gate of ['deterministic', 'codex-cleanup']) test(`V2 favorable Chrome cannot clear ${gate} failure`, async t => {
+  const f = await chromeCoordinatorFixture(t);
+  if (gate === 'deterministic') f.deps.deterministicReview = async () => ({ passed: false, checks: [{ name: 'trusted-tests', passed: false }] });
+  else { const original = f.deps.codexReview; f.deps.codexReview = async input => { await original(input); return { passed: false, reasonCode: 'cleanup-failed' }; }; }
+  const c = new ReviewCoordinator(f.deps);
+  assert.equal((await c.startReview()).state, 'review-failed'); assert.equal(f.ready(), undefined); assert.equal(f.issued.length, 0);
+});
+
+for (const changed of ['runtimeGeneration', 'adapterDigest', 'channelId', 'policy']) test(`V2 ${changed} drift after favorable callback cannot issue a nonce`, async t => {
+  const f = await chromeCoordinatorFixture(t);
+  let currentPolicy = f.deps.policy; f.deps.currentPolicy = () => currentPolicy;
+  const run = f.deps.chromeReview;
+  f.deps.chromeReview = async request => {
+    const result = await run(request);
+    if (changed === 'policy') currentPolicy = { ...currentPolicy, schemaVersion: 999 };
+    else f.context({ [changed]: changed === 'runtimeGeneration' ? 4 : changed === 'channelId' ? OTHER : 'b'.repeat(64) });
+    return result;
+  };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
+  try { assert.notEqual((await work).state, 'eligible'); } catch (error) { assert.match(error.message, /[Cc]ustody|Policy/); }
+  assert.equal(f.issued.length, 0); assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+for (const crash of ['absent', 'present-unmarked', 'marked']) test(`V2 startup reconciles ${crash} semantic receipt exactly once without recreating decisions`, async t => {
+  const f = await chromeCoordinatorFixture(t);
+  const finalize = f.receiptStore.finalizeEvent.bind(f.receiptStore); const mark = f.journal.markReceipted.bind(f.journal);
+  if (crash === 'absent') f.receiptStore.finalizeEvent = async input => { if (input.eventType === 'eligible') throw new Error('simulated crash'); return finalize(input); };
+  if (crash === 'present-unmarked') f.journal.markReceipted = async () => { throw new Error('simulated crash'); };
+  const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle();
+  try { await work; } catch { /* Crash boundary is expected to halt this coordinator. */ }
+  f.receiptStore.finalizeEvent = finalize; f.journal.markReceipted = mark;
+  const issuedBefore = f.issued.length;
+  for (let i = 0; i < 2; i++) {
+    const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER }); await journal.recover();
+    const restarted = new ReviewCoordinator({ ...f.deps, chromeJournal: journal });
+    await restarted.resumePendingActivation();
+    assert.equal(journal.recoveryState(), 'receipted');
+    const chain = await f.receiptStore.verifyChain();
+    const first = chain.receipts.find(r => r.semanticReview);
+    assert.equal(journal.snapshot().receiptHash, first.receiptHash);
+    if (crash === 'absent') { assert.equal(first.eventType, 'review-failed'); assert.equal(first.semanticReview.reasonCode, 'terminal-receipt-interrupted'); assert.equal(first.semanticReview.analysis, null); }
+    assert.equal(chain.receipts.filter(r => ['eligible', 'review-failed'].includes(r.eventType)).length, 1);
+    assert.equal(f.issued.length, issuedBefore);
+  }
+});
+
+for (const boundary of ['before-publication', 'after-publication', 'after-mark']) test(`V2 emergency Stop at ${boundary} withdraws the attempt without a grant`, async t => {
+  const f = await chromeCoordinatorFixture(t);
+  const cancel = () => { const { type, packet, ...binding } = f.ready(); assert.equal(f.bridge.handleSettlement({ type: 'review.chromeCancel', ...binding, reasonCode: 'emergency-stop', availabilityStatus: 'available', executionStatus: 'failed' }), true); };
+  const finalize = f.receiptStore.finalizeEvent.bind(f.receiptStore);
+  f.receiptStore.finalizeEvent = async input => {
+    if (input.eventType === 'eligible' && boundary === 'before-publication') cancel();
+    const receipt = await finalize(input);
+    if (input.eventType === 'eligible' && boundary === 'after-publication') cancel();
+    return receipt;
+  };
+  const mark = f.journal.markReceipted.bind(f.journal);
+  f.journal.markReceipted = async hash => { await mark(hash); if (boundary === 'after-mark') cancel(); };
+  const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle();
+  assert.equal((await work).state, boundary === 'before-publication' ? 'review-failed' : 'rejected');
+  assert.equal(f.issued.length, 0); assert.equal(f.journal.recoveryState(), 'receipted');
+  assert.equal((await f.artifact()).reasonCode, boundary === 'before-publication' ? 'cancellation' : null);
+  const chain = await f.receiptStore.verifyChain();
+  assert.equal(chain.receipts.filter(receipt => receipt.eventType === 'review-failed').length, boundary === 'before-publication' ? 1 : 0);
+  assert.equal(chain.receipts.some(receipt => receipt.eventType === 'human-accepted'), false);
+  assert.equal(f.settle(), false);
+});
+
+for (const broken of ['finalize', 'reread', 'mark']) test(`V2 ${broken} failure cannot emit false native finalization or issue a nonce`, async t => {
+  const f = await chromeCoordinatorFixture(t); const sent = [];
+  const router = createLifecycleRouter({ coordinator: f.coordinator, receiptStore: f.receiptStore, presentation: { openReviewReport() {}, openChromeDeveloperProject() {} }, chromeBridge: f.bridge, send: message => sent.push(message) });
+  await router.handle({ type: 'update.status' });
+  const finalize = f.receiptStore.finalizeEvent.bind(f.receiptStore);
+  f.receiptStore.finalizeEvent = async input => {
+    if (input.eventType === 'eligible' && broken === 'finalize') throw new Error('simulated finalization crash');
+    const receipt = await finalize(input);
+    if (input.eventType === 'eligible' && broken === 'reread') f.receiptStore.verifyChain = async () => ({ state: 'custody-broken' });
+    return receipt;
+  };
+  if (broken === 'mark') f.journal.markReceipted = async () => { throw new Error('simulated mark crash'); };
+  const work = router.handle({ type: 'review.start', reviewId: 'review-1', candidateDigest: f.staged.manifest.bundleDigest });
+  await f.waitChrome(work); f.settle(); await work;
+  assert.equal(f.coordinator.chromeFinalizationPending, true);
+  assert.equal(f.issued.length, 0);
+  assert.equal(sent.some(message => ['review.eligible', 'review.failed'].includes(message.type)), false);
+});
+
+test('V2 durably finalized ordinary failure emits its native failure acknowledgement', async t => {
+  const f = await chromeCoordinatorFixture(t); const sent = [];
+  const router = createLifecycleRouter({ coordinator: f.coordinator, receiptStore: f.receiptStore, presentation: { openReviewReport() {}, openChromeDeveloperProject() {} }, chromeBridge: f.bridge, send: message => sent.push(message) });
+  await router.handle({ type: 'update.status' });
+  const work = router.handle({ type: 'review.start', reviewId: 'review-1', candidateDigest: f.staged.manifest.bundleDigest });
+  await f.waitChrome(work); f.settle('unavailable'); await work;
+  assert.equal(f.journal.recoveryState(), 'receipted');
+  assert.equal(sent.filter(message => message.type === 'review.failed').length, 1);
+});
+
+for (const withdrawn of [true, false]) test(`V2 real rejected receipt navigation ${withdrawn ? 'opens only for failed withdrawal' : 'remains unavailable after human rejection'}`, async t => {
+  const f = await chromeCoordinatorFixture(t); const sent = [], opened = [];
+  const binding = { reviewId: 'review-1', candidateDigest: f.staged.manifest.bundleDigest };
+  const router = createLifecycleRouter({ coordinator: f.coordinator, receiptStore: f.receiptStore, presentation: { openReviewReport: report => opened.push(report), openChromeDeveloperProject: () => opened.push('desktop') }, chromeBridge: f.bridge, send: message => sent.push(message) });
+  if (withdrawn) {
+    const finalize = f.receiptStore.finalizeEvent.bind(f.receiptStore);
+    f.receiptStore.finalizeEvent = async input => {
+      const receipt = await finalize(input);
+      if (input.eventType === 'eligible') {
+        const { type, packet, ...issued } = f.ready();
+        assert.equal(f.bridge.handleSettlement({ type: 'review.chromeCancel', ...issued, reasonCode: 'emergency-stop', availabilityStatus: 'available', executionStatus: 'failed' }), true);
+      }
+      return receipt;
+    };
+  }
+  await router.handle({ type: 'update.status' });
+  const work = router.handle({ type: 'review.start', ...binding });
+  await f.waitChrome(work); f.settle(); await work;
+  if (!withdrawn) {
+    const eligible = sent.find(message => message.type === 'review.eligible');
+    await router.handle({ type: 'review.reject', ...binding, policyDigest: eligible.policyDigest, nonce: eligible.rejectNonce });
+  }
+  assert.equal(f.coordinator.state, 'rejected');
+  const chain = await f.receiptStore.verifyChain(); const last = chain.receipts.at(-1);
+  assert.equal(last.eventType, 'rejected');
+  assert.equal(f.journal.snapshot().receiptHash, chain.receipts.find(receipt => receipt.eventType === 'eligible').receiptHash);
+  assert.equal(sent.filter(message => message.type === 'review.failed').length, withdrawn ? 1 : 0);
+  assert.equal(f.issued.length, withdrawn ? 0 : 2);
+  for (const type of ['review.openReport', 'review.openDesktop']) {
+    await router.handle({ type, ...binding, reviewId: 'different-review' });
+    await router.handle({ type, ...binding, candidateDigest: 'f'.repeat(64) });
+  }
+  assert.deepEqual(opened, []);
+  await router.handle({ type: 'review.openReport', ...binding });
+  await router.handle({ type: 'review.openDesktop', ...binding });
+  assert.deepEqual(opened, withdrawn ? [`${last.directory}/report.md`, 'desktop'] : []);
+  assert.equal((await f.receiptStore.verifyChain()).receipts.length, chain.receipts.length);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+for (const key of ['evidenceDigest', 'inputDigest', 'adapterDigest', 'runtimeGeneration', 'invocationId']) test(`V2 rejects replayed or changed ${key} result binding`, async t => {
+  const f = await chromeCoordinatorFixture(t); const run = f.deps.chromeReview;
+  f.deps.chromeReview = async request => { const value = structuredClone(await run(request)); value.binding[key] = key === 'runtimeGeneration' ? 99 : key === 'invocationId' ? 'replayed' : 'f'.repeat(64); return value; };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
+  assert.equal((await work).state, 'review-failed'); assert.equal(f.issued.length, 0);
+  assert.equal((await f.artifact()).reasonCode, 'provenance-drift');
+});
+
+test('V2 changed source after Chrome completion cannot satisfy the immutable evidence gate', async t => {
+  const f = await chromeCoordinatorFixture(t); const run = f.deps.chromeReview;
+  f.deps.chromeReview = async request => {
+    const value = await run(request); const file = path.join(f.staged.bundleRoot, 'native-host/host.js');
+    await chmod(file, 0o600); await writeFile(file, '// changed during analysis'); await chmod(file, 0o400); return value;
+  };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
+  try { assert.notEqual((await work).state, 'eligible'); } catch (error) { assert.match(error.message, /[Cc]ustody/); }
+  assert.equal(f.issued.length, 0);
+});
+
+test('V2 startup converts an interrupted pending journal to one failed receipt and never resumes analysis', async t => {
+  const f = await chromeCoordinatorFixture(t);
+  f.deps.chromeReview = async request => { await f.journal.begin(request.binding); throw new Error('simulated process death before result'); };
+  const c = new ReviewCoordinator(f.deps);
+  await assert.rejects(() => c.startReview(), /[Cc]ustody/);
+  assert.equal(f.journal.recoveryState(), 'pending');
+  for (let i = 0; i < 2; i++) {
+    const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+    const restarted = new ReviewCoordinator({ ...f.deps, chromeJournal: journal });
+    assert.equal((await restarted.resumePendingActivation()).state, 'review-failed');
+    assert.equal(journal.snapshot().reasonCode, 'interrupted-restart');
+    assert.equal(journal.recoveryState(), 'receipted');
+  }
+  assert.equal((await f.artifact()).reasonCode, 'terminal-receipt-interrupted');
+  assert.equal(f.ready(), undefined); assert.equal(f.issued.length, 0);
+  assert.equal((await f.events()).filter(state => state === 'review-failed').length, 1);
+});
+
+for (const conflict of ['evidenceDigest', 'candidateDigest', 'invocationId', 'receiptHash', 'reasonCode']) test(`V2 startup refuses conflicting retained journal ${conflict}`, async t => {
+  const f = await chromeCoordinatorFixture(t);
+  const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle(); await work;
+  const file = path.join(f.root, 'chrome-review-pending.json');
+  const record = JSON.parse(await readFile(file));
+  if (conflict === 'receiptHash') record.receiptHash = 'f'.repeat(64);
+  else if (conflict === 'reasonCode') record.reasonCode = 'cancellation';
+  else {
+    record.binding[conflict] = conflict === 'invocationId' ? 'substituted-invocation' : 'f'.repeat(64);
+    if (conflict === 'invocationId') record.usedInvocationIds = ['substituted-invocation'];
+  }
+  await writeFile(file, canonicalJson(record) + '\n');
+  const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+  const restarted = new ReviewCoordinator({ ...f.deps, chromeJournal: journal });
+  await assert.rejects(() => restarted.resumePendingActivation(), /[Cc]ustody/);
+  assert.equal(f.issued.length, 2);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+test('V2 terminal bridge cleanup failure after a favorable result cannot issue either nonce', async t => {
+  const f = await chromeCoordinatorFixture(t);
+  f.deps.completeChromeReview = () => { throw new Error('simulated final cleanup failure'); };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
+  await assert.rejects(() => work, /[Cc]ustody/);
+  assert.equal(f.issued.length, 0); assert.equal(c.chromeFinalizationPending, true);
+});
+
+test('V2 host-only disconnect retains unknown execution truth in its permanent artifact', async t => {
+  const f = await chromeCoordinatorFixture(t); const work = f.coordinator.startReview(); await f.waitChrome(work);
+  await f.bridge.close('connection-loss');
+  assert.equal((await work).state, 'review-failed');
+  const artifact = await f.artifact();
+  assert.equal(artifact.reasonCode, 'connection-loss'); assert.equal(artifact.availabilityStatus, 'not-checked'); assert.equal(artifact.executionStatus, 'failed');
+  assert.equal(f.issued.length, 0); assert.equal(f.journal.recoveryState(), 'receipted');
+});
+
+test('V2 refuses a favorable dependency while bridge terminal cleanup is unconfirmed', async t => {
+  const f = await chromeCoordinatorFixture(t); const status = f.deps.chromeReviewStatus;
+  f.deps.chromeReviewStatus = binding => ({ ...status(binding), terminal: false });
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
+  const result = await work; assert.equal(result.state, 'review-failed'); assert.equal(f.issued.length, 0);
+  assert.equal((await f.artifact()).reasonCode, 'custody-failure');
+});
+
+for (const action of ['accept', 'reject']) test(`V2 issued ${action} decision cannot outlive its runtime generation`, async t => {
+  const f = await chromeCoordinatorFixture(t); const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle();
+  const result = await work; f.context({ runtimeGeneration: 4 });
+  await assert.rejects(() => f.coordinator[action === 'accept' ? 'acceptReview' : 'rejectReview'](action === 'accept' ? result.decision : result.rejection), /binding|state|Chrome/);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+test('V2 coordinator appends after a historical V1 terminal review without changing its bytes', async t => {
+  const f = await chromeCoordinatorFixture(t);
+  const historical = new ReceiptStore({ root: path.join(f.projectRoot, 'review-receipts'), immutable: async () => {} });
+  const before = [];
+  for (const eventType of ['available', 'staged', 'review-failed']) {
+    const receipt = await historical.finalizeEvent({ reviewId: 'historical-v1', eventType, outcome: eventType, verifierIdentities: [{ name: 'review-coordinator', version: '1' }], activeBundleDigest: f.first.manifest.bundleDigest, candidateBundleDigest: f.staged.manifest.bundleDigest,
+      projectEvidence: { activeVersion: {}, candidateVersion: {}, sourceHashes: {}, dependencyLock: {}, testResults: {} }, osEvidence: { before: {}, verification: {}, after: {} } });
+    before.push({ file: path.join(receipt.directory, 'receipt.json'), bytes: await readFile(path.join(receipt.directory, 'receipt.json')) });
+  }
+  const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle();
+  assert.equal((await work).state, 'eligible');
+  for (const entry of before) assert.deepEqual(await readFile(entry.file), entry.bytes);
+  assert.equal((await f.receiptStore.verifyChain()).state, 'intact');
+});
+
+test('V2 a late disconnect cannot relabel an already terminal unavailable result', async t => {
+  const f = await chromeCoordinatorFixture(t); const run = f.deps.chromeReview;
+  f.deps.chromeReview = async request => { const result = await run(request); await f.bridge.close('connection-loss'); return result; };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle('unavailable');
+  assert.equal((await work).state, 'review-failed');
+  assert.equal((await f.artifact()).reasonCode, 'unavailable');
+  const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+  const restarted = new ReviewCoordinator({ ...f.deps, chromeJournal: journal });
+  assert.equal((await restarted.resumePendingActivation()).state, 'review-failed');
+});
+
+test('V2 adapter drift after receipt publication withdraws with its actual provenance reason', async t => {
+  const f = await chromeCoordinatorFixture(t); const finalize = f.receiptStore.finalizeEvent.bind(f.receiptStore);
+  f.receiptStore.finalizeEvent = async input => { const receipt = await finalize(input); if (input.eventType === 'eligible') f.context({ adapterDigest: 'b'.repeat(64) }); return receipt; };
+  const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle();
+  assert.equal((await work).state, 'rejected'); assert.equal(f.issued.length, 0);
+  const last = (await f.receiptStore.verifyChain()).receipts.at(-1);
+  const results = JSON.parse(await readFile(path.join(last.directory, 'project/test-results.json')));
+  assert.equal(results.checks.at(-1).reasonCode, 'provenance-drift');
+});
+
+for (const mode of [0o600, 0o4400]) test(`V2 changed source custody mode ${mode.toString(8)} withholds eligibility`, async t => {
+  const f = await chromeCoordinatorFixture(t); const run = f.deps.chromeReview;
+  f.deps.chromeReview = async request => { const result = await run(request); await chmod(path.join(f.staged.bundleRoot, 'native-host/host.js'), mode); return result; };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
+  assert.equal((await work).state, 'review-failed'); assert.equal(f.issued.length, 0);
 });
 
 for (const mode of ['missing', 'duplicate', 'mismatch']) test(`coordinator refuses eligibility for ${mode} verifier evidence`, async t => {

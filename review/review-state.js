@@ -1,9 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { assertSupportedReviewPolicy, loadReviewPolicy } from './policy-registry.js';
 
-const table = JSON.parse(readFileSync(new URL('../policy/review-policy.v1.json', import.meta.url), 'utf8')).stateTransitions;
-export function transitionReview(from, to) {
+const historical = loadReviewPolicy(1);
+export function transitionReview(from, to, policy = historical) {
+  const table = assertSupportedReviewPolicy(policy).stateTransitions;
   if (from === null ? to === 'available' : Object.hasOwn(table, from) && table[from].includes(to)) return to;
   throw new Error('Forbidden review transition');
 }
 
-export const terminalReview = state => Object.hasOwn(table, state) && table[state].length === 0;
+export const terminalReview = (state, policy = historical) => {
+  const table = assertSupportedReviewPolicy(policy).stateTransitions;
+  return Object.hasOwn(table, state) && table[state].length === 0;
+};

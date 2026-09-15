@@ -86,10 +86,10 @@ function assertSemanticStatus(value) {
   } else if (reasonCode === 'terminal-receipt-interrupted') {
     semanticSchema(['available', 'not-checked'].includes(availabilityStatus) && executionStatus === 'failed');
   } else {
-    // Before inference, cancellation/expiry can occur at any known availability
-    // state. An attempted inference requires the recorded available state.
+    // not-checked/failed is the native host's absent terminal observation:
+    // the invocation failed; this does not claim that inference ran or did not.
     semanticSchema(INTERRUPTED_FAILURES.has(reasonCode));
-    semanticSchema(executionStatus === 'not-run' || (executionStatus === 'failed' && availabilityStatus === 'available'));
+    semanticSchema(executionStatus === 'not-run' || (executionStatus === 'failed' && ['available', 'not-checked'].includes(availabilityStatus)));
   }
 }
 

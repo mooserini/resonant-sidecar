@@ -11,19 +11,37 @@ import { ReceiptStore } from '../review/receipt-store.js';
 import { DecisionNonces } from '../review/decision-nonce.js';
 import { ReviewCoordinator } from '../review/review-coordinator.js';
 import { runBootstrap } from '../bootstrap/host.js';
-import { encodeNativeMessage } from '../native-host/native-framing.js';
+import { encodeNativeMessage, NativeMessageDecoder } from '../native-host/native-framing.js';
 import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { collectMacOSEvidence } from '../review/macos-evidence.js';
 import { policy as osPolicy, runner } from './fixtures/macos/fixture.js';
 import { bridgeFixture, observations, NOW, RAW, until } from './fixtures/chrome-bridge.js';
+import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { ChromeReviewBridge } from '../review/chrome-review-bridge.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
 
 const policy = JSON.parse(readFileSync(new URL('../policy/review-policy.v1.json', import.meta.url)));
 const favorable = { schemaVersion: 1, verdict: 'favorable', summary: 'No policy concerns', behavioralDifferences: [], dependencyChanges: [], unexplainedFiles: [], policyConcerns: [] };
-async function liveFixture(t) {
+
+test('Chrome cancel remains observable after result resolution and before permanent receipt acknowledgement', async t => {
+  const f = await bridgeFixture(t); const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: f.binding.restartId }); await journal.recover();
+  let ready;
+  const bridge = new ChromeReviewBridge({ journal, currentChannel: () => f.current, send: value => { ready = value; }, clock: () => NOW, ...observations });
+  t.after(() => bridge.close('connection-loss'));
+  const work = bridge.request({ binding: f.binding, packet: f.packet, deadline: f.deadline }); await until(() => ready);
+  assert.equal(bridge.handleSettlement({ type: 'review.chromeResult', ...f.binding, rawText: RAW, reasonCode: null, availabilityStatus: 'available', executionStatus: 'completed' }), true);
+  assert.equal((await work).type, 'ChromeReviewResult');
+  assert.equal(journal.recoveryState(), 'terminal-unreceipted');
+  assert.equal(bridge.handleSettlement({ type: 'review.chromeCancel', ...f.binding, reasonCode: 'emergency-stop', availabilityStatus: 'available', executionStatus: 'failed' }), true);
+  assert.equal(bridge.status(f.binding).reasonCode, 'emergency-stop');
+  assert.equal(bridge.handleSettlement({ type: 'review.chromeResult', ...f.binding, rawText: RAW, reasonCode: null, availabilityStatus: 'available', executionStatus: 'completed' }), false);
+});
+async function liveFixture(t, options = {}) {
+  const fixturePolicy = options.chrome ? loadReviewPolicy(2) : policy;
   const f = await runtimeFixture(t); const first = await f.stage('first'); const next = await f.stage('next', '// next');
   const seed = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: consumer() });
   await seed.installVersion(first); await seed.activate(decisionFor(first)); await seed.completeActivation(decisionFor(first));
-  const receipts = new ReceiptStore({ root: path.join(f.projectRoot, 'review-receipts'), immutable: async () => {} });
+  const receipts = new ReceiptStore({ root: path.join(f.projectRoot, 'review-receipts'), policy: fixturePolicy, immutable: async () => {} });
   let coordinator; let bootstrap; let failAfter = false; let rejectSend = false;
   const store = new VersionStore({ projectRoot: f.projectRoot, consumeDecision: d => coordinator.consumeDecision(d), verifyConsumedDecision: b => coordinator.verifyConsumedDecision(b) });
   const runtime = {
@@ -32,13 +50,13 @@ async function liveFixture(t) {
     stopCandidate: () => bootstrap.stopCandidate(), restartPrevious: () => bootstrap.restartPrevious(),
     withTransition: operation => bootstrap.withTransition(operation),
   };
-  const deps = { receiptStore: receipts, nonceStore: new DecisionNonces({ root: f.root }), versionStore: store, policy, reviewId: () => 'next', runtime,
+  const deps = { receiptStore: receipts, nonceStore: new DecisionNonces({ root: f.root }), versionStore: store, policy: fixturePolicy, reviewId: () => 'next', runtime,
     candidateSource: { inspect: async () => ({ state: 'available', digest: next.manifest.bundleDigest }), stage: async () => next },
-    deterministicReview: async () => ({ passed: true, checks: [{ name: 'trusted-tests', passed: true }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: next.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) }),
+    deterministicReview: async () => ({ passed: true, checks: [{ name: 'trusted-tests', passed: true }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: next.manifest.bundleDigest, policySnapshotHash: sha256Json(fixturePolicy) }),
     codexReview: async input => {
       const identity = { pid: 105, executablePath: '/usr/bin/true', executableSha256: sha256Bytes(readFileSync('/usr/bin/true')) };
       const binding = await input.sampleVerifier(identity);
-      const r = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, verifierIdentities: [{ name: 'codex-process-evidence', sha256: sha256Json(binding) }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: next.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) };
+      const r = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, verifierIdentities: [{ name: 'codex-process-evidence', sha256: sha256Json(binding) }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: next.manifest.bundleDigest, policySnapshotHash: sha256Json(fixturePolicy) };
       await input.finalizeResult(r); return r;
     },
     ownershipPolicy: (phase, live) => {
@@ -52,18 +70,53 @@ async function liveFixture(t) {
     },
     collectEvidence: async input => { const e = await collectMacOSEvidence({ ...input, runner: runner().run }); if (input.phase === 'after' && failAfter) { failAfter = false; e.processes.find(p => p.name === 'active-host').listeners.push({ fd: 17, protocol: 'TCP', address: '127.0.0.1', port: 9000, transport: 'tcp' }); } return e; },
   };
+  if (options.chrome) Object.assign(deps, {
+    chromeJournal: Object.fromEntries(['recover', 'snapshot', 'markReceipted', 'finish'].map(method => [method, (...args) => bootstrap.chromeReviewJournal[method](...args)])),
+    chromeContext: () => ({ ...bootstrap.chromeReviewIdentity, adapterDigest: 'a'.repeat(64), ...observations }),
+    mintChromeInvocation: () => bootstrap.mintChromeInvocation(), chromeReview: request => bootstrap.requestChromeReview(request),
+    chromeReviewStatus: binding => bootstrap.chromeReviewStatus(binding), completeChromeReview: binding => bootstrap.completeChromeReview(binding), clock: () => NOW,
+  });
   coordinator = new ReviewCoordinator(deps);
   const input = new PassThrough(); const starts = []; const turns = []; const reaped = [];
-  bootstrap = await runBootstrap({ store, coordinator, input, output: new PassThrough(), signals: new EventEmitter(), proxyFactory: ({ active, onMessage }) => {
+  const output = new PassThrough(); const messages = []; const decoder = new NativeMessageDecoder(message => messages.push(message)); output.on('data', chunk => decoder.push(chunk));
+  bootstrap = await runBootstrap({ store, coordinator, input, output, ...(options.chrome ? { chromeReview: { projectRoot: f.projectRoot, clock: () => NOW, ...observations } } : {}), signals: new EventEmitter(), proxyFactory: ({ active, onMessage }) => {
     starts.push(active.reviewId);
     return { pid: 103, send: m => { if (rejectSend) throw new Error('proxy transport rejected frame'); if (m.type === 'session.open') queueMicrotask(() => onMessage({ type: 'session.ready', threadId: 'thread-kept' })); else turns.push({ reviewId: active.reviewId, type: m.type }); }, close: async () => { reaped.push(active.reviewId); } };
   } });
   input.write(encodeNativeMessage({ type: 'session.open', threadId: 'thread-kept' }));
   while (!bootstrap.runtimeState?.threadId) await new Promise(r => setTimeout(r, 5));
-  return { ...f, first, next, receipts, store, coordinator, bootstrap, input, starts, turns, reaped, deps,
+  return { ...f, first, next, receipts, store, coordinator, bootstrap, input, starts, turns, reaped, deps, messages,
     failAfter: () => { failAfter = true; }, rejectSend: () => { rejectSend = true; }, events: async () => (await receipts.verifyChain()).receipts?.map(r => r.eventType),
   };
 }
+
+test('native emergency Stop after Chrome result finalizes one failed artifact and still interrupts conversation', async t => {
+  const f = await liveFixture(t, { chrome: true });
+  try {
+  const finalize = f.receipts.finalizeEvent.bind(f.receipts); let interrupts = 0;
+  f.receipts.finalizeEvent = async input => {
+    if (input.eventType === 'eligible') { interrupts++; f.input.write(encodeNativeMessage({ type: 'turn.interrupt' })); }
+    return finalize(input);
+  };
+  let issued = 0; const issue = f.deps.nonceStore.issue.bind(f.deps.nonceStore);
+  f.deps.nonceStore.issue = (...args) => { issued++; return issue(...args); };
+  const work = f.coordinator.startReview();
+  await until(() => f.messages.some(message => message.type === 'review.chromeReady'));
+  const { type, packet, ...binding } = f.messages.find(message => message.type === 'review.chromeReady');
+  const result = { type: 'review.chromeResult', ...binding, rawText: RAW, reasonCode: null, availabilityStatus: 'available', executionStatus: 'completed' };
+  f.input.write(encodeNativeMessage(result));
+  assert.equal((await work).state, 'review-failed');
+  await until(() => f.turns.some(turn => turn.type === 'turn.interrupt'));
+  assert.equal(interrupts, 1); assert.equal(issued, 0);
+  assert.equal(f.bootstrap.chromeReviewJournal.recoveryState(), 'receipted');
+  const chain = await f.receipts.verifyChain(); const terminal = chain.receipts.at(-1);
+  assert.equal(terminal.semanticReview.reasonCode, 'cancellation'); assert.equal(terminal.semanticReview.analysis, null);
+  assert.equal(chain.receipts.filter(receipt => receipt.eventType === 'review-failed').length, 1);
+  f.input.write(encodeNativeMessage(result)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.coordinator.state, 'review-failed'); assert.equal(issued, 0);
+  assert.equal((await f.store.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+  } finally { await f.bootstrap.close(); }
+});
 
 test('disconnect inside activation finalizer cannot commit a reaped candidate', { timeout: 15000 }, async t => {
   const f = await liveFixture(t); const e = await f.coordinator.startReview();

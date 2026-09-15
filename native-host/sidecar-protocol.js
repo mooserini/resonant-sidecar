@@ -102,12 +102,12 @@ export function createLifecycleRouter({ coordinator, receiptStore, presentation,
   const emit = (type, extra = {}) => { if (!closed) send(parseLifecycleEvent({ type, ...(binding ?? { reviewId: null, candidateDigest: null }), ...extra })); };
   const matches = m => binding && BINDING.every(k => m[k] === binding[k]);
   const resultMatches = r => r && matches(r);
-  const fail = () => { state = 'failed'; grant = rejection = null; emit('review.failed'); };
+  const fail = () => { state = 'failed'; grant = rejection = null; if (coordinator.chromeFinalizationPending !== true) emit('review.failed'); };
   async function navigate(message) {
     const chain = await receiptStore.verifyChain();
     if (closed || chain.state !== 'intact') throw new Error('Review navigation unavailable');
     const receipt = chain.receipts.filter(r => r.reviewId === message.reviewId && r.candidateBundleDigest === message.candidateDigest).at(-1);
-    if (!receipt || !['review-failed', 'custody-broken', 'rolled-back', 'activation-failed'].includes(receipt.eventType) || typeof receipt.directory !== 'string') throw new Error('Review navigation unavailable');
+    if (!receipt || !['review-failed', 'custody-broken', 'rolled-back', 'activation-failed', 'rejected'].includes(receipt.eventType) || typeof receipt.directory !== 'string') throw new Error('Review navigation unavailable');
     if (message.type === 'review.openReport') await presentation.openReviewReport(`${receipt.directory}/report.md`);
     else await presentation.openChromeDeveloperProject();
     // Task 9 can latch custody-broken; no successful presentation verdict or

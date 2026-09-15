@@ -91,6 +91,7 @@ export class ChromeReviewBridge {
     let verified;
     try {
       verified = verifyRequest(input);
+      if (this.#pending?.phase === 'resolved' && this.#journal.snapshot()?.receiptCommitted) this.complete(this.#pending.binding);
       if (this.#pending || this.#invalidated(verified.binding)) invalid();
       const remaining = Date.parse(verified.binding.deadline) - this.#clock();
       if (remaining < 0 || remaining > 2147483646) invalid();
@@ -114,6 +115,13 @@ export class ChromeReviewBridge {
     try { message = parseChromeSettlement(value); } catch { return false; }
     const pending = this.#pending;
     if (!message || !pending || CHROME_BINDING_FIELDS.some(key => message[key] !== pending.binding[key])) return false;
+    if (pending.phase === 'resolved' && pending.terminalReason === null && !pending.cancelReason && message.type === 'review.chromeCancel') {
+      // Permanent receipt publication owns the classification of this race.
+      // Retain cancellation without rewriting the already terminal journal.
+      pending.cancelReason = message.reasonCode;
+      pending.observedStatus = { availabilityStatus: message.availabilityStatus, executionStatus: message.executionStatus };
+      return true;
+    }
     if (pending.phase === 'settling' && pending.settlementReason === null && !pending.cancelReason && message.type === 'review.chromeCancel') {
       pending.cancelReason = message.reasonCode;
       pending.observedStatus = { availabilityStatus: message.availabilityStatus, executionStatus: message.executionStatus }; return true;
@@ -143,14 +151,25 @@ export class ChromeReviewBridge {
         const finalReason = this.#failure(pending);
         if (finalReason) { reason = finalReason; result = null; await this.#journal.finish(pending.binding, reason); }
       }
-      pending.phase = 'terminal'; if (this.#pending === pending) this.#pending = null;
+      pending.phase = 'resolved'; pending.terminalReason = reason;
       // Without a bound adapter settlement, not-checked means the host received
       // no terminal availability observation. Failed describes the invocation;
       // neither scalar asserts whether a browser model session actually ran.
       const status = pending.observedStatus ?? { availabilityStatus: 'not-checked', executionStatus: 'failed' };
       pending.resolve(freezeReviewValue(reason ? { type: 'ChromeReviewFailure', schemaVersion: 2, binding: pending.binding, reasonCode: reason,
         ...status, executionStatus: status.executionStatus === 'completed' ? 'failed' : status.executionStatus, completedAt: new Date(this.#clock()).toISOString() } : { ...result, binding: pending.binding, ...status }));
-    })().catch(() => pending.reject(new Error('Chrome review terminal journal unavailable'))).finally(() => { pending.phase = 'terminal'; if (this.#pending === pending) this.#pending = null; });
+    })().catch(() => { pending.phase = 'terminal'; if (this.#pending === pending) this.#pending = null; pending.reject(new Error('Chrome review terminal journal unavailable')); });
+  }
+  status(value) {
+    const binding = parseChromeBinding(value), pending = this.#pending;
+    if (!pending || canonicalJson(binding) !== canonicalJson(pending.binding)) invalid();
+    const status = pending.observedStatus ?? { availabilityStatus: 'not-checked', executionStatus: 'failed' };
+    return freezeReviewValue({ terminal: pending.phase === 'resolved', reasonCode: pending.terminalReason ?? this.#failure(pending), ...status });
+  }
+  complete(value) {
+    const binding = parseChromeBinding(value), pending = this.#pending, record = this.#journal.snapshot();
+    if (!pending || pending.phase !== 'resolved' || canonicalJson(binding) !== canonicalJson(pending.binding) || !record?.receiptCommitted || canonicalJson(record.binding) !== canonicalJson(binding)) invalid();
+    clearTimeout(pending.timer); pending.phase = 'terminal'; this.#pending = null;
   }
   async close(reasonCode) {
     if (!CLOSE_REASONS.has(reasonCode)) invalid();

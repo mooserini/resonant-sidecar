@@ -253,6 +253,14 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
       if (!chromeBridge || stopped) return Promise.reject(new Error('Chrome review unavailable'));
       return chromeBridge.request(request);
     },
+    chromeReviewStatus(binding) {
+      if (!chromeBridge) throw new Error('Chrome review unavailable');
+      return chromeBridge.status(binding);
+    },
+    completeChromeReview(binding) {
+      if (!chromeBridge) throw new Error('Chrome review unavailable');
+      return chromeBridge.complete(binding);
+    },
   };
 }
 

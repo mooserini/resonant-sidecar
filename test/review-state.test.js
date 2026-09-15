@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { transitionReview } from '../review/review-state.js';
+import { transitionReview, terminalReview } from '../review/review-state.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
 
 // Literal approved graph: removing an edge or permitting a shortcut is a bug.
 const graph = {
@@ -21,4 +22,13 @@ test('only available can initialize a review', () => {
   assert.equal(transitionReview(null, 'available'), 'available');
   for (const to of Object.keys(graph).filter(s => s !== 'available')) assert.throws(() => transitionReview(null, to), /transition/);
   assert.throws(() => transitionReview('toString', 'available'), /transition/);
+});
+
+test('V2 requires Chrome review and preserves the historical V1 shortcut', () => {
+  const v2 = loadReviewPolicy(2);
+  assert.throws(() => transitionReview('codex-review', 'eligible', v2), /transition/);
+  assert.equal(transitionReview('codex-review', 'chrome-semantic-review', v2), 'chrome-semantic-review');
+  for (const next of ['eligible', 'review-failed', 'custody-broken']) assert.equal(transitionReview('chrome-semantic-review', next, v2), next);
+  assert.equal(terminalReview('chrome-semantic-review', v2), false);
+  assert.equal(transitionReview('codex-review', 'eligible'), 'eligible');
 });
