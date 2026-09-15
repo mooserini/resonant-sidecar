@@ -222,3 +222,27 @@ test('ready timeout remains bounded while waiting for a click and rejects an ove
   assert.equal(h.results[0].reasonCode, 'timeout'); assert.equal(h.results[0].executionStatus, 'not-run');
   assert.equal(h.calls.some(call => call[0] === 'create'), false);
 });
+
+test('sent result remains cancelable until native finalization without a second destroy or result', async t => {
+  const h = await harness(t); await h.adapter.inspect(h.ready); await h.adapter.run();
+  assert.equal(h.results.length, 1); assert.equal(h.sessions[0].destroyCalls, 1);
+  assert.equal(h.adapter.cancel('emergency-stop'), true);
+  assert.equal(h.cancels.length, 1); assert.equal(h.cancels[0].reasonCode, 'emergency-stop');
+  assert.equal(h.results.length, 1); assert.equal(h.sessions[0].destroyCalls, 1);
+  assert.equal(h.adapter.cancel('emergency-stop'), false);
+});
+
+test('native finalization retires a sent result silently and prevents later cancellation or timer output', async t => {
+  const h = await harness(t); await h.adapter.inspect(h.ready); await h.adapter.run();
+  h.adapter.finalize(); h.adapter.destroy('panel-closure'); h.advance(600000);
+  assert.equal(h.cancels.length, 0); assert.equal(h.results.length, 1); assert.equal(h.sessions[0].destroyCalls, 1);
+});
+
+for (const reason of ['provenance-drift', 'connection-loss', 'timeout']) test(`post-result ${reason} cannot send a second chromeResult`, async t => {
+  const h = await harness(t); await h.adapter.inspect(h.ready); await h.adapter.run();
+  h.adapter.cancel(reason);
+  assert.equal(h.results.length, 1);
+  assert.equal(h.cancels.length, reason === 'provenance-drift' ? 1 : 0);
+  if (reason === 'provenance-drift') assert.equal(h.cancels[0].reasonCode, 'cancellation');
+  assert.equal(h.sessions[0].destroyCalls, 1);
+});

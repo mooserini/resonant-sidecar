@@ -29,7 +29,7 @@ export class SidecarSession {
   get reviewState() { return this.#reviewState; }
   get canNavigateReview() { return this.#reviewState === 'failed' && this.#review !== null; }
   get chromeReviewState() { return this.#chromeState; }
-  get chromeReviewActive() { return this.#chrome !== null && !this.#chrome.revoked && !['completed', 'failed', 'stopped'].includes(this.#chromeState.state); }
+  get chromeReviewActive() { return this.#ownsChrome() && !this.#chrome.finalized && !['failed', 'stopped'].includes(this.#chromeState.state); }
   constructor({ connectNative, storage, onEvent = () => {}, languageModel, chromeReviewOptions = {} }) {
     this.#chromeOptions = { languageModel, clock: chromeReviewOptions.clock, setTimer: chromeReviewOptions.setTimer, clearTimer: chromeReviewOptions.clearTimer };
     this.connectNative = connectNative;
@@ -92,9 +92,20 @@ export class SidecarSession {
   }
   #invalidateChrome(reason) {
     const owner = this.#chrome;
-    if (!owner || owner.revoked) return;
-    owner.adapter.destroy(reason);
+    if (!owner) return;
+    // Remove decision authority before any adapter callback or Port send can
+    // reenter this controller. Native-finalized work needs no more settlement.
+    this.#decision = null;
+    if (this.#reviewState === 'eligible') this.#reviewState = 'stopped';
+    if (owner.revoked) return;
+    if (!owner.finalized) owner.adapter.destroy(reason);
     owner.revoked = true;
+    this.onEvent({ type: 'review.chromeState' });
+  }
+  #finalizeChrome() {
+    if (!this.#chrome || this.#chrome.finalized) return;
+    this.#chrome.finalized = true;
+    this.#chrome.adapter.finalize();
   }
   #chromeReady(value) {
     let request;
@@ -106,7 +117,7 @@ export class SidecarSession {
       if (Object.keys(this.#chrome.binding).some(key => request[key] !== this.#chrome.binding[key])) this.#invalidateChrome('provenance-drift');
       return;
     }
-    const owner = { port: this.port, connectionGeneration: this.#connectionGeneration, revoked: false,
+    const owner = { port: this.port, connectionGeneration: this.#connectionGeneration, revoked: false, finalized: false,
       binding: Object.freeze(Object.fromEntries(Object.entries(request).filter(([key]) => key !== 'packet' && key !== 'type'))) };
     const send = message => {
       if (!this.#ownsChrome(owner) || Object.keys(owner.binding).some(key => message[key] !== owner.binding[key])) return;
@@ -156,6 +167,15 @@ export class SidecarSession {
   }
   #choose(action) {
     if (this.#reviewState !== 'eligible' || !this.#decision) throw new Error('Review action unavailable');
+    if (this.#chrome) {
+      const binding = this.#chrome.binding;
+      if (!this.#ownsChrome() || !this.#chrome.finalized || this.#chromeState.state !== 'completed'
+        || this.#review?.reviewId !== binding.reviewId || this.#review?.candidateDigest !== binding.candidateDigest
+        || this.#decision.reviewId !== binding.reviewId || this.#decision.candidateDigest !== binding.candidateDigest || this.#decision.policyDigest !== binding.policyDigest) {
+        this.#invalidateChrome('provenance-drift');
+        throw new Error('Review action unavailable');
+      }
+    }
     const grant = this.#decision; this.#decision = null;
     this.#postReview('review.' + action, action === 'accept' ? 'accepting' : 'rejected', { policyDigest: grant.policyDigest, nonce: action === 'accept' ? grant.nonce : grant.rejectNonce });
   }
@@ -185,12 +205,13 @@ export class SidecarSession {
     } else if (event.type === 'review.failed') {
       if ((!same && !(this.#reviewState === 'idle' && this.#statusRequested && event.reviewId === null)) || ['failed', 'completed', 'dismissed'].includes(this.#reviewState)) return;
       this.#reviewState = 'failed'; this.#decision = null; this.#statusRequested = false;
-      this.#invalidateChrome('custody-failure');
+      this.#finalizeChrome();
     } else {
       if (!same) return;
       const transitions = { 'review.started': ['requested', 'reviewing'], 'review.eligible': ['reviewing', 'eligible'], 'activation.started': ['accepting', 'activating'], 'activation.completed': ['activating', 'completed'], 'activation.rolledBack': ['activating', 'failed'] };
       const transition = transitions[event.type];
       if (!transition || this.#reviewState !== transition[0]) return;
+      if (event.type === 'review.eligible') this.#finalizeChrome();
       this.#reviewState = transition[1];
       this.#decision = event.type === 'review.eligible' ? event : null;
     }

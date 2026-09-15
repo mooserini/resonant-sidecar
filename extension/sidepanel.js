@@ -107,10 +107,10 @@ function handleEvent(event) {
 
 function renderReview() {
   const state = session.reviewState;
-  const labels = { available: 'Update available', requested: 'Review in progress', reviewing: 'Review in progress', eligible: 'Ready to refresh', accepting: 'Refresh requested', activating: 'Refreshing', completed: 'Refresh complete', failed: 'Review failed' };
+  const labels = { available: 'Update available', requested: 'Review in progress', reviewing: 'Review in progress', eligible: 'Ready to refresh', accepting: 'Refresh requested', activating: 'Refreshing', completed: 'Refresh complete', stopped: 'Review stopped', failed: 'Review failed' };
   const focused = document.activeElement;
   const focusWasInCard = reviewCard.contains(focused);
-  const visible = state === 'failed' ? ['open-report', 'open-desktop', 'dismiss-review'] : state === 'completed' ? ['dismiss-review'] : state === 'eligible' ? ['accept-review', 'reject-review'] : state === 'available' ? ['start-review', 'accept-review'] : ['accept-review'];
+  const visible = state === 'failed' ? ['open-report', 'open-desktop', 'dismiss-review'] : state === 'completed' ? ['dismiss-review'] : state === 'eligible' ? ['accept-review', 'reject-review'] : state === 'available' ? ['start-review', 'accept-review'] : state === 'stopped' ? [] : ['accept-review'];
   const controls = Object.entries(reviewButtons).map(([id, button]) => ({ button,
     hidden: !visible.includes(id),
     disabled: (id === 'accept-review' && state !== 'eligible') || (['open-report', 'open-desktop'].includes(id) && !session.canNavigateReview),
@@ -119,7 +119,7 @@ function renderReview() {
   const chromeVisible = state === 'reviewing' && ['checking', 'ready', 'preparation-required', 'preparing', 'running', 'completed'].includes(chromeState);
   const prepare = chromeVisible && ['preparation-required', 'preparing'].includes(chromeState);
   controls.push(...Object.entries(chromeButtons).map(([id, button]) => ({ button,
-    hidden: !chromeVisible || (id === 'prepare-chrome-review' ? !prepare : id === 'run-chrome-review' ? !['ready', 'running'].includes(chromeState) : chromeState === 'completed'),
+    hidden: !chromeVisible || (id === 'prepare-chrome-review' ? !prepare : id === 'run-chrome-review' ? !['ready', 'running'].includes(chromeState) : false),
     disabled: id === 'prepare-chrome-review' ? chromeState !== 'preparation-required' : id === 'run-chrome-review' ? chromeState !== 'ready' : !session.chromeReviewActive,
   })));
   // Chromium may blur a disabled/hidden button immediately. Decide where its
@@ -136,7 +136,7 @@ function renderReview() {
   if (reviewCard.hidden) { if (focusWasInCard) (session.turnActive ? stopButton : text).focus(); return; }
   reviewTitle.textContent = labels[state];
   reviewStatus.hidden = state === 'failed';
-  reviewStatus.textContent = state === 'eligible' ? 'Verification passed. Accept this reviewed candidate or reject it.' : state === 'completed' ? 'The refreshed runtime was verified.' : 'Accept becomes available after verification.';
+  reviewStatus.textContent = state === 'eligible' ? 'Verification passed. Accept this reviewed candidate or reject it.' : state === 'completed' ? 'The refreshed runtime was verified.' : state === 'stopped' ? 'This review is no longer available.' : 'Accept becomes available after verification.';
   for (const { button, hidden, disabled } of controls) {
     button.hidden = hidden;
     button.disabled = disabled;

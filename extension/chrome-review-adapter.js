@@ -93,16 +93,28 @@ export function createChromeReviewAdapter({ languageModel, sendResult, sendCance
   }
   function terminal(reasonCode, rawText = null) {
     const active = invocation;
-    if (!active || active.terminal) return false;
-    active.terminal = true; clearTimer(active.timer);
+    if (!active || active.terminal || (reasonCode === null && active.resultSent)) return false;
+    const resultWasSent = active.resultSent;
+    if (reasonCode === null) active.resultSent = true;
+    else active.terminal = true;
+    clearTimer(active.timer);
     active.operation?.controller.abort();
-    active.release(false);
+    if (reasonCode !== null) active.release(false);
+    // Sending bytes is not native finalization. Keep the one result cancelable
+    // through the bound deadline while its native journal/receipt is pending.
+    if (reasonCode === null) arm(600000);
     const isCancel = CANCEL_REASONS.has(reasonCode);
     state(reasonCode === null ? 'completed' : isCancel ? 'stopped' : 'failed');
-    const status = { reasonCode, availabilityStatus: active.availability, executionStatus: reasonCode === null ? 'completed' : active.prompted ? 'failed' : 'not-run' };
+    const transportLost = resultWasSent && ['connection-loss', 'timeout'].includes(reasonCode);
+    const wireReason = resultWasSent && !isCancel && reasonCode !== null ? 'cancellation' : reasonCode;
+    const cancelMessage = isCancel || (resultWasSent && reasonCode !== null);
+    const status = { reasonCode: wireReason, availabilityStatus: active.availability, executionStatus: reasonCode === null ? 'completed' : active.prompted ? 'failed' : 'not-run' };
     // Bound cancellation is initiated before any cleanup that could be slow.
-    send(isCancel ? sendCancel : sendResult, { type: isCancel ? 'review.chromeCancel' : 'review.chromeResult', ...active.binding,
-      ...(!isCancel ? { rawText } : {}), ...status });
+    // After result-sent, only the narrow cancel lane may supersede that result.
+    // Native loss/deadline are observed by the host itself; never send another
+    // result through an already lost channel or claim a browser-owned reason.
+    if (!transportLost) send(cancelMessage ? sendCancel : sendResult, { type: cancelMessage ? 'review.chromeCancel' : 'review.chromeResult', ...active.binding,
+      ...(!cancelMessage ? { rawText } : {}), ...status });
     void dispose(active.operation);
     return true;
   }
@@ -120,7 +132,7 @@ export function createChromeReviewAdapter({ languageModel, sendResult, sendCance
     let request;
     try { request = snapshotReady(value, clock()); } catch { return false; }
     let release;
-    invocation = { ...request, availability: 'not-checked', phase: 'verifying', terminal: false, prompted: false,
+    invocation = { ...request, availability: 'not-checked', phase: 'verifying', terminal: false, resultSent: false, finalized: false, prompted: false,
       cancelled: new Promise(resolve => { release = resolve; }), release: value => release(value), operation: null, timer: null };
     arm(60000);
     const inspecting = (async () => {
@@ -192,7 +204,16 @@ export function createChromeReviewAdapter({ languageModel, sendResult, sendCance
     if (!CANCEL_REASONS.has(reasonCode) && !FAILURE_REASONS.has(reasonCode)) return false;
     return terminal(reasonCode);
   }
+  function finalize() {
+    const active = invocation;
+    if (!active || active.finalized) return false;
+    active.finalized = true; active.terminal = true; destroyed = true;
+    clearTimer(active.timer); active.operation?.controller.abort(); active.release(false);
+    void dispose(active.operation);
+    return true;
+  }
   return Object.freeze({ inspect, prepare: () => execute(true), run: () => execute(false), cancel,
+    finalize,
     destroy(reasonCode = 'panel-closure') { const cancelled = cancel(reasonCode); destroyed = true; return cancelled; },
   });
 }

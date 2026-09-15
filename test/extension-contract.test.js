@@ -495,3 +495,86 @@ for (const action of ['Stop', 'Cancel analysis', 'pagehide']) test(`rendered ${a
   if (action === 'Stop') assert.equal(h.node('connection-status').textContent, 'Stopped');
   if (action === 'Cancel analysis') { assert.equal(h.node('stop-button').disabled, false); assert.equal(h.port.closed, false); }
 });
+
+for (const invalidation of ['emergency Stop', 'session.ready']) for (const action of ['accept', 'reject']) test(`${action} after finalized eligibility and ${invalidation} cannot reuse a decision`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel(), port = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, port, f.binding);
+  port.onMessage.emit({ type: 'review.chromeReady', ...f.binding, packet: f.packet }); await until(() => session.chromeReviewState?.state === 'ready');
+  await session.runChromeReview();
+  const grant = { ...eligible, reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest, policyDigest: f.binding.policyDigest };
+  port.onMessage.emit(grant); assert.equal(session.reviewState, 'eligible'); const before = port.posted.length;
+  if (invalidation === 'emergency Stop') session.emergencyStop(); else port.onMessage.emit({ type: 'session.ready', threadId: 'same' });
+  assert.notEqual(session.reviewState, 'eligible'); assert.throws(() => session[action + 'Review']());
+  port.onMessage.emit(grant); assert.throws(() => session.acceptReview()); assert.throws(() => session.rejectReview());
+  assert.equal(port.posted.length, before, 'finalized native work must not receive redundant cancellation');
+});
+
+for (const action of ['accept', 'reject']) test(`${action} rechecks actual Port after a finalized Chrome grant`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel(), port = new FakePort(), replacement = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  t.after(() => session.disconnect()); await session.connect(); startBoundReview(session, port, f.binding);
+  port.onMessage.emit({ type: 'review.chromeReady', ...f.binding, packet: f.packet }); await until(() => session.chromeReviewState?.state === 'ready'); await session.runChromeReview();
+  port.onMessage.emit({ ...eligible, reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest, policyDigest: f.binding.policyDigest });
+  session.port = replacement;
+  assert.throws(() => session[action + 'Review']()); assert.deepEqual(replacement.posted, []);
+});
+
+for (const invalidation of ['Stop', 'session.ready']) test(`rendered result-sent stays cancelable and ${invalidation} retires finalized decision buttons`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel(), h = await renderedPanel(model);
+  t.after(() => h.windowEvents.pagehide());
+  const request = buildChromeReviewRequest({ evidence: f.packet.evidence, evidenceDigest: f.packet.evidenceDigest, invocationId: f.binding.invocationId,
+    runtimeGeneration: 3, adapterDigest: f.binding.adapterDigest, deadline: new Date(Date.now() + 60000).toISOString() });
+  const binding = { reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest };
+  h.port.onMessage.emit({ type: 'update.available', ...binding }); h.node('start-review').click(); h.port.onMessage.emit({ type: 'review.started', ...binding });
+  h.port.onMessage.emit({ type: 'review.chromeReady', ...wireBinding(request), packet: request.packet }); await until(() => h.node('run-chrome-review')?.disabled === false);
+  h.node('run-chrome-review').click(); await until(() => h.port.posted.some(message => message.type === 'review.chromeResult'));
+  assert.equal(h.node('cancel-chrome-review').hidden, false); assert.equal(h.node('cancel-chrome-review').disabled, false); assert.equal(h.node('stop-button').disabled, false);
+  assert.equal(h.node('run-chrome-review').hidden, true);
+  h.port.onMessage.emit({ ...eligible, ...binding, policyDigest: f.binding.policyDigest });
+  assert.equal(h.node('accept-review').disabled, false); assert.equal(h.node('reject-review').hidden, false);
+  assert.equal(h.node('cancel-chrome-review').hidden, true); assert.equal(h.node('stop-button').disabled, true);
+  h.port.onMessage.emit({ type: 'turn.started' });
+  if (invalidation === 'Stop') h.node('stop-button').click(); else h.port.onMessage.emit({ type: 'session.ready', threadId: 'same' });
+  assert.equal(h.node('accept-review').hidden || h.node('accept-review').disabled, true);
+  assert.equal(h.node('reject-review').hidden || h.node('reject-review').disabled, true);
+  const before = h.port.posted.length; h.node('accept-review').listeners.click(); h.node('reject-review').listeners.click();
+  assert.equal(h.port.posted.length, before); assert.equal(h.port.posted.some(message => message.type === 'review.chromeCancel'), false);
+});
+
+for (const invalidation of ['emergency Stop', 'pagehide', 'disconnect']) test(`delayed real journal result loses to ${invalidation} before native finalization`, async t => {
+  const f = await bridgeFixture(t), model = fakeModel(), port = new FakePort();
+  const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: f.binding.restartId }); await journal.recover();
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+  const originalFinish = journal.finish.bind(journal);
+  journal.finish = async (binding, reason) => { if (reason === 'completed') { entered(); await gate; } return originalFinish(binding, reason); };
+  const bridge = new ChromeReviewBridge({ journal, send: message => port.onMessage.emit(message), currentChannel: () => f.current, clock: () => NOW, ...observations });
+  const post = port.postMessage.bind(port), settlements = [];
+  port.postMessage = message => { post(message); if (['review.chromeResult', 'review.chromeCancel'].includes(message.type)) settlements.push(bridge.handleSettlement(message)); };
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage(), languageModel: model.languageModel, chromeReviewOptions: { clock: () => NOW } });
+  let result, closed;
+  try {
+    await session.connect(); startBoundReview(session, port, f.binding);
+    result = bridge.request({ binding: f.binding, packet: f.packet, deadline: f.deadline });
+    await until(() => session.chromeReviewState?.state === 'ready'); await session.runChromeReview(); await started;
+    assert.equal(journal.recoveryState(), 'pending'); const before = port.posted.length;
+    if (invalidation === 'emergency Stop') session.emergencyStop();
+    else if (invalidation === 'pagehide') session.disconnect();
+    else { port.closed = true; port.onDisconnect.emit(); closed = bridge.close('connection-loss'); }
+    if (invalidation !== 'disconnect') {
+      assert.equal(port.posted.length, before + 1); assert.equal(port.posted.at(-1).type, 'review.chromeCancel');
+      assert.equal(port.posted.at(-1).reasonCode, invalidation === 'emergency Stop' ? 'emergency-stop' : 'panel-closure');
+      assert.deepEqual(settlements, [true, true]);
+    }
+    release();
+    assert.equal((await result).reasonCode, invalidation === 'emergency Stop' ? 'emergency-stop' : invalidation === 'pagehide' ? 'panel-closure' : 'connection-loss');
+    await closed;
+    assert.equal(journal.recoveryState(), 'terminal-unreceipted'); assert.equal(journal.snapshot().receiptCommitted, false);
+    assert.equal(model.sessions[0].destroyed, 1); assert.equal(port.posted.filter(message => message.type === 'review.chromeResult').length, 1);
+    port.onMessage.emit({ ...eligible, reviewId: f.binding.reviewId, candidateDigest: f.binding.candidateDigest, policyDigest: f.binding.policyDigest });
+    assert.throws(() => session.acceptReview()); assert.throws(() => session.rejectReview());
+  } finally {
+    release(); await bridge.close('connection-loss'); await result; await closed; session.disconnect();
+  }
+});
