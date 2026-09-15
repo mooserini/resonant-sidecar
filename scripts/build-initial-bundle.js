@@ -123,6 +123,19 @@ function moduleTokens(source, name) {
   ]);
   const failSyntax = detail => fail(`unparseable trusted module syntax at ${name}: ${detail}`);
 
+  function staticComputedName(tokens, openIndex) {
+    let value = '';
+    for (let index = openIndex + 1, wantString = true; index < tokens.length; index += 1) {
+      if (tokens[index].value === ']') return wantString ? null : value;
+      if (wantString && tokens[index].type === 'string' && !tokens[index].escaped) value += tokens[index].value;
+      else if (wantString && tokens[index].type === 'string' && tokens[index].escaped) failSyntax('escaped computed property names are forbidden');
+      else if (!wantString && tokens[index].value !== '+') return null;
+      else if (wantString) return null;
+      wantString = !wantString;
+    }
+    return null;
+  }
+
   function stringToken(start, quote) {
     let index = start + 1;
     let value = '';
@@ -212,6 +225,7 @@ function moduleTokens(source, name) {
         tokens.push({ type: 'template-boundary', value: 'end', start: index - 1 });
         continue;
       }
+      if (character === '\\') failSyntax('identifier escapes are forbidden in trusted control code');
       if (identifierStart(character)) {
         const begin = index++;
         while (identifierPart(source[index])) index += 1;
@@ -244,7 +258,10 @@ function moduleTokens(source, name) {
     const token = tokens[index];
     if (token.type === 'identifier' && generatedCodeOrLoader.has(token.value)) fail(`runtime loader or code generation is forbidden at ${name}`);
     if (token.type === 'identifier' && token.value === 'constructor' && tokens[index - 1]?.value === '.') fail(`runtime loader or code generation is forbidden at ${name}`);
-    if (token.type === 'string' && token.value === 'constructor' && tokens[index - 1]?.value === '[' && tokens[index + 1]?.value === ']') fail(`runtime loader or code generation is forbidden at ${name}`);
+    if (token.value === '[') {
+      const computedName = staticComputedName(tokens, index);
+      if (computedName && (generatedCodeOrLoader.has(computedName) || computedName === 'constructor')) fail(`runtime loader or code generation is forbidden at ${name}`);
+    }
   }
   return tokens;
 }

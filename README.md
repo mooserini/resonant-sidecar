@@ -90,13 +90,16 @@ The bundle builder performs a declaration/capability comparison against the
 canonical policy; it does not claim to have compared live behavior. Its lexical
 gate closes the declared trusted import graph to pinned relative files and
 explicit, runtime-recognized `node:` built-ins. It also rejects non-literal
-dynamic imports and executable uses of ambient loaders or string-code
-generators such as `require`, `createRequire`, `eval`, and the `Function`
-family. The pinned `review/trusted-harness.js` deliberately uses Node's VM
-module API with its own fixed linker and disabled string/Wasm generation. The
-trusted bootstrap remains reviewed trusted code, not a general JavaScript
-sandbox; the lexical gate is one input to exact-hash human approval, not a
-claim that arbitrary semantic code generation is impossible.
+dynamic imports and recognized literal, escaped-identifier, and statically
+foldable computed-property forms of ambient loaders or string-code generators
+such as `require`, `createRequire`, `eval`, and the `Function` family.
+Arbitrary JavaScript equivalence remains outside this detector's guarantee;
+the exact committed trusted-bootstrap bytes are the trust root. The pinned
+`review/trusted-harness.js` deliberately uses Node's VM module API with its
+own fixed linker and disabled string/Wasm generation. The trusted bootstrap
+remains reviewed trusted code, not a general JavaScript sandbox; the lexical
+gate is one input to exact-hash human approval, not a claim that arbitrary
+semantic code generation is impossible.
 
 After an approved preparation, verify the sealed on-disk migration chain against
 the exact reviewed plan before opening Chrome Dev:

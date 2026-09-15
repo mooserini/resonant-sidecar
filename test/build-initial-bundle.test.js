@@ -81,6 +81,18 @@ for (const [name, source, pattern] of [
   await assert.rejects(() => inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git }), pattern);
 });
 
+for (const [name, source] of [
+  ['escaped eval identifier', String.raw`\u0065val("import('ambient')")`],
+  ['escaped constructor identifier', String.raw`(async()=>{}).constr\u0075ctor("return import('ambient')")()`],
+  ['computed createRequire property', `m['create' + 'Require'](import.meta.url)('ambient')`],
+  ['computed builtin loader chain', `process['getBuiltin' + 'Module']('module')['create' + 'Require'](import.meta.url)('ambient')`],
+]) {
+  test(`trusted closure rejects ${name}`, async () => {
+    const files = repositoryFiles(); files['bootstrap/host.js'] = source;
+    await assert.rejects(() => inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git }), /loader|generation|syntax/i);
+  });
+}
+
 test('trusted closure allows only explicit node builtins and pinned literal relatives', async () => {
   const files = repositoryFiles();
   files['bootstrap/host.js'] = "import { readFile } from 'node:fs/promises';\nexport { default as proxy } from './native-proxy.js';\nawait import('../review/canonical-json.js');\nawait import('node:test');\nvoid readFile;\n";
