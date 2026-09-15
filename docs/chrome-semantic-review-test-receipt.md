@@ -3,8 +3,9 @@
 This is a fake-model boundary proof. It does not establish real Chrome API
 availability, browser integration, inference locality, model accuracy, exact
 model identity, or prompt-injection resistance. The human-present inert
-capability check remains a separate checkpoint. No installation, migration,
-registration, candidate activation, publication, or push is part of this proof.
+capability check is a separate checkpoint recorded later in this file. No
+installation, migration, registration, candidate activation, publication, or
+push is part of either proof.
 
 ## Reproduce
 
@@ -136,5 +137,100 @@ The bootstrap remains an exact reviewed and pinned source identity with bounded
 lexical defense in depth; these tests do not prove arbitrary JavaScript safe.
 
 Exact local RED/GREEN commands, counts, hashes, and commit identities belong in
-the ignored Task 10 report and TAP receipts. Real Chrome capability results
-have not been collected by this task.
+the ignored Task 10 report and TAP receipts.
+
+## Human-present inert capability check
+
+Date: 2026-09-15. Probe document commit: `fdef7c327369a4fe5e451acf7f7644d2be365d84`.
+Worktree: `/Users/thomaskenny/Developer/Uncle-Russet/resonant-sidecar/.worktrees/visible-review-refresh`.
+This checkpoint does not load the prepared V2 extension, change native-host
+registration, migrate V1, review a candidate, or push.
+
+Tom approved the exact frozen Console script hash
+`0684a6e86be943271d5f3abdc08a72fd086b0695f6dcde9d5690e68b461f0956`
+and its resource consequence before any `LanguageModel.create()` or `prompt()`.
+
+### Target
+
+- Browser: Google Chrome Dev 155.0.8048.0, local Agent profile (`Profile 3`)
+- Already-loaded unpacked V1 extension ID: `algfplhdbapdaoimggafkgmpmnadfppl`
+- Loaded path: `/Users/thomaskenny/Developer/Uncle-Russet/resonant-sidecar/extension`
+- Side-panel URL observed by the script:
+  `chrome-extension://algfplhdbapdaoimggafkgmpmnadfppl/sidepanel.html`
+- Declared and granted APIs: `nativeMessaging`, `sidePanel`, `storage`
+- Host permissions: none
+- Live manifest SHA-256: `24c3db6d6cde3b620c0307a36316e3150d59f43b3f54cf9d14ade77ff71e9db9`
+
+The worktree `extension/` tree was not loaded. The extension was not reloaded,
+replaced, or reinstalled to make this check work.
+
+### Separate collector observation (not a LanguageModel field)
+
+- Executable: `/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev`
+- Executable SHA-256: `9d961658010224003357deb7c67048570d8b6687dcd22e8c87f367183abf3876`
+- Signing identifier `com.google.Chrome.dev`, team `EQHXZ8M8AV`,
+  CDHash `2d0aaeff20299688c0aa451cfd10d57713e0a783`
+- Authority: Developer ID Application: Google LLC (EQHXZ8M8AV) /
+  Developer ID Certification Authority / Apple Root CA; notarization stapled
+- `codesign --verify --strict` exit 1: disallowed `com.apple.FinderInfo` xattr on
+  `Google Chrome Framework.framework/Versions/Current/.`
+  Displayed identity is recorded; strict verification is not claimed as passed.
+
+### Console snapshots (exact 17-field allowlist)
+
+Availability after paste, no create:
+
+`startedAt` `2026-09-15T08:36:26.657Z`; `availability` `available`;
+`state` `available`; `preparation` `not-needed`; `structuredOutput` `not-run`;
+`finishedAt` `null`; `runDestroy` `not-created`.
+
+After one trusted **Run inert probe** click:
+
+`state` `running` at `2026-09-15T08:39:05.421Z`; `runDestroy` `pending`.
+
+Chrome then printed its own Built-In AI / LanguageModel feedback notice. That
+text is browser-originated and is not a probe receipt field.
+
+Terminal snapshot:
+
+```json
+{"probeRevision":"resonant-sidecar.inert-capability.v1","inputSha256":"88f4231031edc2969eececefe010ebe8de434dbec7c106af1148e55413a42d63","schemaSha256":"25ef9c147e32bf985d9481d22e1e5f3ffa19859b3e72e751a7a1824631b20b00","startedAt":"2026-09-15T08:36:26.657Z","updatedAt":"2026-09-15T08:39:12.122Z","finishedAt":"2026-09-15T08:39:12.122Z","sidePanelUrl":"chrome-extension://algfplhdbapdaoimggafkgmpmnadfppl/sidepanel.html","sidePanelOrigin":"chrome-extension://algfplhdbapdaoimggafkgmpmnadfppl","availability":"available","state":"completed","preparation":"not-needed","preparationProgress":null,"contextWindow":9216,"structuredOutput":"passed","abort":"not-requested","preparationDestroy":"not-created","runDestroy":"succeeded"}
+```
+
+`structuredOutput: passed` means the returned JSON matched the inline V2 schema
+shape. It is not semantic correctness, candidate authority, or production parser
+acceptance. No model prose, findings, or extra fields were logged. The run
+session was destroyed (`runDestroy: succeeded`). Prepare was not used.
+
+### Lifecycle
+
+Before close, Chrome Dev PID was 23891. Ordinary V1 native-host `host.js` and
+`codex app-server` were attached because the side panel was open. The probe
+script did not call `chrome.runtime`, `connectNative`, or `sendMessage`. Browser
+PID 23891 also listened on `127.0.0.1:9222` (DevTools/CDP); that listener was
+not opened by the probe.
+
+After panel close and reopen: probe buttons absent; no analysis auto-ran. A
+fresh native-host pair started. The panel showed Codex
+`no rollout found for thread id 01a0a434-e741-7162-812c-3c7fad84b64a`. That is
+V1 conversation continuity, not a LanguageModel result and not a resumed probe.
+
+After full Chrome Dev quit and Agent-profile relaunch: Chrome PID 87164;
+new native-host pair; probe buttons absent; no analysis auto-running; panel
+looked like the uninitiated sidecar. Former invocation could not resume.
+
+Ignored local evidence:
+`review-receipts/runtime-comparisons/2026-09-15T08-33-14Z-chrome-language-model-capability/`.
+
+### Labels
+
+- `modelIdentityAssurance: not-attested`
+- `inferenceBinding: not-established`
+- Locality observation, not a proof:
+  `documented-on-device; no adapter network observed`
+- Acquisition vs inference: availability was already `available`, so this run
+  did not click Prepare. Session destroy does not imply deletion of
+  Chrome-managed model files.
+
+Stop. Do not load the prepared stable extension, change the native-host
+manifest, migrate V1, run a real candidate review, or begin the old Task 12.
