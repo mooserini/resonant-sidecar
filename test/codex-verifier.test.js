@@ -11,11 +11,30 @@ import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { sanitizeEvidence } from '../review/redaction.js';
 import { ReceiptStore } from '../review/receipt-store.js';
 import { eventsFor, fakeCodex, favorable } from './fixtures/fake-codex-exec.js';
+import { buildSourceDiff } from '../review/source-diff.js';
+import { buildSemanticEvidence } from '../review/semantic-evidence.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
+import { AFTER, BEFORE, sourceFixture } from './fixtures/semantic-source.js';
 
 const policy = JSON.parse(await readFile(new URL('../policy/review-policy.v1.json', import.meta.url)));
 const schema = JSON.parse(await readFile(new URL('../policy/codex-attestation.v1.schema.json', import.meta.url)));
 const manifest = await buildBundleManifest({ root: new URL('./fixtures/bundles/minimal-pass/', import.meta.url).pathname,
   files: ['extension/manifest.json', 'native-host/host.js', 'package.json'], sourceCommit: 'a'.repeat(40), schemaVersion: 1 });
+
+test('V2 Codex prompt receives actual changed source bytes in the common evidence', async t => {
+  const files = await sourceFixture(t);
+  const v2 = loadReviewPolicy(2);
+  const common = buildSemanticEvidence({ reviewId: 'source-byte-review', activeManifest: files.activeManifest, candidateManifest: files.candidateManifest,
+    policy: v2, deterministic: { passed: true, checks: [{ name: 'schema', passed: true }], policySnapshotHash: sha256Json(v2),
+      activeBundleDigest: files.activeManifest.bundleDigest, candidateBundleDigest: files.candidateManifest.bundleDigest },
+    sourceDiff: await buildSourceDiff(files) });
+  assert.equal(common.evidence.sourceDiff.changedFiles[0].beforeText, BEFORE);
+  assert.equal(common.evidence.sourceDiff.changedFiles[0].afterText, AFTER);
+  const prompt = buildCodexReviewPrompt(common);
+  assert.ok(prompt.includes(JSON.stringify(BEFORE)));
+  assert.ok(prompt.includes(JSON.stringify(AFTER)));
+  assert.equal(prompt.includes('Committed local bundle; canonical manifests and deterministic checks are authoritative.'), false);
+});
 
 function insertEvent(event) {
   const lines = eventsFor(JSON.stringify(favorable)).split('\n');
