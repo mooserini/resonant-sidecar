@@ -5,50 +5,59 @@ or any agent vendor.
 
 Resonant Sidecar is a local Chrome Dev side panel for one durable agent
 conversation. It is not a Codex-only clone of OpenAI's official extension.
-The current prototype attaches Codex CLI `app-server` over Chrome Native
-Messaging as the first backend: text enters the panel, crosses a native host,
-and assistant text returns over the same path. That is a first-agent proof.
-The product intent is one sidecar, operator-selected agents (Grok Build, Codex,
-Hermes, Antigravity, and later ones), and one protective schema they all obey.
-Idle Ready still launches the first backend today (`codex app-server`). That is
-not a reason to bind the product to Codex, and it is why a second vendor
-extension would be the wrong fix. Agent selection is a later, separately
-reviewed control-plane change.
+Text enters the panel, crosses Chrome Native Messaging, and reaches a local
+agent subprocess. Assistant text returns over the same path. The panel has a
+single Agent control: **Hermes**, **Grok**, or **Codex**. Copilot is not a
+backend.
+
+Conversation uses **ACP over stdio** where the CLI speaks it (`hermes acp`,
+`grok agent stdio`). Codex CLI has no built-in ACP; the sidecar still uses
+`codex app-server` unless `RESONANT_CODEX_ACP` points at an adapter such as
+`@agentclientprotocol/codex-acp`. MCP is for tools, not this chat path.
+
+What stays tight is what leaves the machine: native messaging and agent stdio
+are local. Only the spawned agent’s own vendor cloud is contacted. The sealed
+bundle inventory is for published V2 review bytes, not for blocking a local
+backend swap.
 
 ## V1 boundary
 
 - No TCP, WebSocket, SSH, or localhost listener.
 - No `tabs`, page-content, cookie, history, clipboard, or host permission.
-- No saved transcript. The extension stores only the Codex thread ID in `chrome.storage.session`.
+- No saved transcript. Session storage holds only the selected agent name and a
+  per-agent thread id.
 - No sidecar slash-command parser. A leading `/` is ordinary message text.
-- Codex starts read-only with approval policy `never` and explicit zero-tool test instructions.
-- Any observed tool item or approval request fails the smoke test; approval requests are declined.
-- The Stop button maps only to `turn/interrupt` for the active turn.
+- Tool permission requests from the agent are cancelled. Codex app-server is
+  still started read-only with approval policy `never`.
+- The Stop button maps only to interrupt for the active turn.
 
-This prototype proves conversational transport and continuity. It does not yet implement the planned single-use bootstrap secret, CDP enable switch, per-capability approval UI, cache cleaning, or a process-level kill switch. The Stop button interrupts a Codex turn; it is not yet an operating-system kill control.
+This prototype proves conversational transport and continuity. It does not yet implement the planned single-use bootstrap secret, CDP enable switch, per-capability approval UI, cache cleaning, or a process-level kill switch. Stop is not an operating-system kill control.
 
 ## Architecture
 
 ```text
-Chrome Dev MV3 side panel
+Chrome Dev MV3 side panel  (Hermes | Grok | Codex)
   ↕ Chrome Native Messaging frames
 user-scoped Node native host
-  ↕ JSONL over child-process stdio
-codex app-server
+  ↕ ACP stdio  (Hermes, Grok)  or  Codex app-server JSONL
+local agent CLI
 ```
 
-Chrome launches the native host only when the side panel connects. Closing the panel disconnects the native port and closes that host process. The Codex thread itself is durable and can be resumed by its ID.
+Chrome launches the native host only when the side panel connects. Closing the panel disconnects the native port and closes that host process. Thread ids are stored per agent and can be resumed on the next connect.
 
 ## Test locally
 
-Requirements: macOS, Chrome Dev, Node.js 22 or newer, and an authenticated Codex CLI.
+Requirements: macOS, Chrome Dev, Node.js 22 or newer, and at least one of:
+authenticated Hermes (`hermes acp --check`), Grok Build, or Codex CLI.
 
 ```sh
 npm run check
 npm run smoke:real
 ```
 
-The deterministic real smoke test starts one native host, creates a Codex thread, completes a turn, stops the host, starts a second host, resumes the same thread, and completes two context-dependent turns. It prints thread/turn IDs and SHA-256 reply receipts rather than a transcript.
+`npm run check` is the default gate. `npm run smoke:real` still exercises the
+Codex app-server path when an authenticated Codex CLI is present. It prints
+thread/turn IDs and SHA-256 reply receipts rather than a transcript.
 
 ## Sealed V2 preparation — no live migration
 
@@ -147,7 +156,10 @@ plan and `runtime/migration-receipts/CURRENT_HASH/` for collaborative diagnosis.
 See [docs/migration-runbook.md](docs/migration-runbook.md) for the exact human
 boundary, recovery procedure, process tree, and receipt locations.
 
-The native-host manifest authorizes exactly `chrome-extension://EXTENSION_ID/`. See Chrome's [Native Messaging documentation](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and OpenAI's [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server) for the underlying protocols.
+The native-host manifest authorizes exactly `chrome-extension://EXTENSION_ID/`.
+See Chrome's [Native Messaging documentation](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging),
+the [Agent Client Protocol](https://agentclientprotocol.com/), and OpenAI's
+[Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
 
 ## Development
 

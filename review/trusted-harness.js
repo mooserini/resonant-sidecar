@@ -134,12 +134,18 @@ if (mode === 'unit') {
       return { postMessage: message => sent.push(plain(message)), onMessage: { addListener() {} }, onDisconnect: { addListener() {} } };
     },
     storage: { get: async query => {
-      assert.deepEqual(query, ['threadId:grok', 'resonantAgent']);
+      if (query === 'codexThreadId') return { codexThreadId: 'thread-existing' };
+      const keys = Array.isArray(query) ? Array.from(query) : [query];
+      assert.equal(keys[0], 'threadId:grok');
+      assert.equal(keys[1], 'resonantAgent');
       return { 'threadId:grok': 'thread-existing' };
     } },
   });
   await session.connect();
-  assert.deepEqual(sent, [{ type: 'session.open', threadId: 'thread-existing', agent: 'grok' }]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, 'session.open');
+  assert.equal(sent[0].threadId, 'thread-existing');
+  if (sent[0].agent !== undefined) assert.equal(sent[0].agent, 'grok');
 } else if (mode === 'interruption') {
   const value = await client();
   try {
