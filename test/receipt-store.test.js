@@ -143,6 +143,31 @@ test('only the incomplete-input failure may bind before Chrome entry and all its
   assert.equal((await store.verifyChain()).state, 'intact');
 });
 
+test('incomplete-input chronology cannot satisfy an already pending Chrome entry', async t => {
+  const { store } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await enterChrome(store);
+  const semanticReview = chromeReceipt({ coverageStatus: 'incomplete-input', availabilityStatus: 'not-checked', executionStatus: 'not-run', reasonCode: 'incomplete-input', analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' });
+  await assert.rejects(() => store.finalizeEvent({ ...event('review-failed'), semanticReview }), /schema|custody/i);
+  const chain = await store.verifyChain();
+  assert.equal(chain.state, 'intact'); assert.equal(chain.count, 5);
+  assert.equal(chain.receipts.at(-1).eventType, 'chrome-semantic-review');
+});
+
+test('incomplete-input chronology remains invalid after contradictory Chrome history is fully rehashed', async t => {
+  const { store, root } = await fixture(t, { policy: loadReviewPolicy(2) });
+  await enterChrome(store);
+  await store.finalizeEvent({ ...event('review-failed'), semanticReview: chromeReceipt({ executionStatus: 'failed', reasonCode: 'timeout', analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' }) });
+  const chain = await store.verifyChain();
+  await rehashHistory(root, chain.receipts, async (receipt, directory, index) => {
+    if (index !== 5) return;
+    const artifact = chromeReceipt({ coverageStatus: 'incomplete-input', availabilityStatus: 'not-checked', executionStatus: 'not-run', reasonCode: 'incomplete-input', analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' });
+    const target = path.join(directory, semanticFile);
+    await chmod(target, 0o600); await writeFile(target, canonicalJson(artifact)); await chmod(target, 0o444);
+    receipt.semanticReviewsHash = sha256Json(artifact);
+  });
+  assert.equal((await store.verifyChain()).state, 'custody-broken');
+});
+
 test('V2 cannot omit the first terminal artifact or attach one at Chrome entry', async t => {
   const { store } = await fixture(t, { policy: loadReviewPolicy(2) });
   await assert.rejects(() => store.finalizeEvent({ ...event('chrome-semantic-review'), semanticReview: chromeReceipt() }));

@@ -294,13 +294,19 @@ export class ReviewCoordinator {
   async #recoverChrome(chain) {
     try {
       const owners = new Map(), issued = new Set();
+      const previous = new Map(), unissuedReviews = new Map();
+      const enteredReviews = new Set(chain.receipts.filter(receipt => receipt.policySnapshotHash === reviewPolicyDigest(2) && receipt.eventType === 'chrome-semantic-review').map(receipt => receipt.reviewId));
       for (const receipt of chain.receipts) {
+        if (receipt.policySnapshotHash !== reviewPolicyDigest(2)) continue;
+        const predecessor = previous.get(receipt.reviewId);
+        previous.set(receipt.reviewId, receipt.eventType);
         const artifact = receipt.semanticReview;
-        if (receipt.policySnapshotHash !== reviewPolicyDigest(2) || !artifact) continue;
+        if (!artifact) continue;
+        if (!unissuedReviews.has(receipt.reviewId)) unissuedReviews.set(receipt.reviewId, predecessor === 'deterministic-review' && !enteredReviews.has(receipt.reviewId));
         const owner = owners.get(artifact.invocationId);
         if (owner && owner !== receipt.reviewId) throw new CustodyError('Chrome invocation identity reused');
         owners.set(artifact.invocationId, receipt.reviewId);
-        const unissued = artifact.reasonCode === 'incomplete-input' && artifact.coverageStatus === 'incomplete-input' && artifact.executionStatus === 'not-run' && artifact.availabilityStatus === 'not-checked' && artifact.analysis === null && artifact.analysisDigest === null && artifact.eligibilityEffect === 'candidate-withheld';
+        const unissued = unissuedReviews.get(receipt.reviewId) && artifact.reasonCode === 'incomplete-input' && artifact.coverageStatus === 'incomplete-input' && artifact.executionStatus === 'not-run' && artifact.availabilityStatus === 'not-checked' && artifact.analysis === null && artifact.analysisDigest === null && artifact.eligibilityEffect === 'candidate-withheld';
         if (!unissued) issued.add(artifact.invocationId);
       }
       await this.#d.chromeJournal.recover();

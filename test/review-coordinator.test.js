@@ -498,6 +498,31 @@ test('V2 retained invocation custody exempts only unissued incomplete-input hist
   assert.equal(f.issued.length, 0); assert.deepEqual(f.effects, []);
 });
 
+for (const reader of ['real-store', 'legacy-attested-chain']) test(`V2 incomplete-input chronology cannot hide a missing issued journal through ${reader}`, async t => {
+  const f = await chromeCoordinatorFixture(t); const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle('unavailable'); await work;
+  const chain = await f.receiptStore.verifyChain(), last = chain.receipts.at(-1);
+  const artifact = { ...last.semanticReview, coverageStatus: 'incomplete-input', availabilityStatus: 'not-checked', executionStatus: 'not-run', reasonCode: 'incomplete-input', analysis: null, analysisDigest: null, eligibilityEffect: 'candidate-withheld' };
+  const receipt = JSON.parse(await readFile(path.join(last.directory, 'receipt.json')));
+  receipt.semanticReviewsHash = sha256Json(artifact);
+  const receiptHash = sha256Json(receipt);
+  for (const [name, bytes] of [['semantic-reviews/chrome-language-model.json', canonicalJson(artifact)], ['receipt.json', canonicalJson(receipt)], ['receipt.sha256', `${receiptHash}\n`]]) {
+    const file = path.join(last.directory, name); await chmod(file, 0o600); await writeFile(file, bytes); await chmod(file, 0o444);
+  }
+  await writeFile(path.join(f.projectRoot, 'review-receipts', '.custody-head'), canonicalJson({ count: chain.count, tailHash: receiptHash }));
+  await unlink(path.join(f.root, 'chrome-review-pending.json'));
+  if (reader === 'legacy-attested-chain') {
+    // Independently test coordinator chronology even if an upstream reader
+    // attests this formerly accepted, consistently rehashed real-file history.
+    const attested = { ...chain, tailHash: receiptHash, receipts: [...chain.receipts.slice(0, -1), { ...last, ...receipt, receiptHash, semanticReview: artifact }] };
+    f.receiptStore.verifyChain = async () => structuredClone(attested);
+  }
+  for (let i = 0; i < 2; i++) {
+    const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+    await assert.rejects(() => new ReviewCoordinator({ ...f.deps, chromeJournal: journal }).resumePendingActivation(), /[Cc]ustody/);
+  }
+  assert.equal(f.issued.length, 0); assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
 for (const older of [false, true]) test(`V2 retained invocation custody forbids ${older ? 'older' : 'latest'} incomplete-input ID reuse`, async t => {
   const f = await chromeCoordinatorFixture(t, { largeSource: true }); await f.coordinator.startReview();
   if (older) { const next = await laterChromeAttempt(t, f); assert.equal((await next.coordinator.startReview()).state, 'review-failed'); }

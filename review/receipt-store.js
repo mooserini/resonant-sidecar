@@ -110,7 +110,7 @@ function assertSemanticHistory(receipts) {
           const incomplete = !state.pending && prior?.eventType === 'deterministic-review' && receipt.eventType === 'review-failed' &&
             artifact.coverageStatus === 'incomplete-input' && artifact.executionStatus === 'not-run' &&
             artifact.reasonCode === 'incomplete-input' && artifact.eligibilityEffect === 'candidate-withheld';
-          schema(state.pending ? prior?.eventType === 'chrome-semantic-review' : incomplete);
+          schema(state.pending ? prior?.eventType === 'chrome-semantic-review' && artifact.coverageStatus === 'complete-input-supplied' : incomplete);
           const anchor = state.pending ?? prior;
           assertSameReviewBinding(receipt, anchor);
           assertSameReviewBinding(artifact, anchor);
