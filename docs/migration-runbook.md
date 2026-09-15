@@ -11,8 +11,8 @@ extension directory, reload Chrome Dev, or open the side panel until Tom
 explicitly approves that exact plan and install hash.
 
 Approval of a different plan, source commit, extension ID, current-install hash,
-or bundle digest is not approval of the displayed plan. Re-run the dry run after
-any change.
+Codex executable identity, bundle digest, inventory, or install hash is not
+approval of the displayed plan. Re-run the dry run after any change.
 
 ## Read-only plan
 
@@ -30,8 +30,12 @@ node scripts/verify-install-plan.js /tmp/resonant-sidecar-migration-plan.json
 The last command is a structural verifier only; it does not write. The plan
 must name `Google Chrome Dev`, exactly one *proposed*
 `chrome-extension://EXTENSION_ID/` origin, the current launcher and manifest
-hashes, the committed source hash, every pinned payload/bootstrap/extension file
-with destination/hash/mode, and one overall install hash. It must mark the
+bytes and hashes, the committed source hash, the inspected concrete non-symlink
+Codex executable path/hash/mode, the owner-only `0700` review home, every pinned
+payload/bootstrap/extension/baseline file with destination/hash/mode, and one
+overall install hash. The verifier also checks the initial active pin, completed
+recovery state, and installation witness as one self-consistent VersionStore
+baseline. It must mark the
 stable-path identity `unverified` and registration
 `unchanged-pending-stable-id-proof`. The caller-provided ID is an expected ID,
 not proof of the ID Chrome will derive for the new unpacked path. The plan must
@@ -46,29 +50,38 @@ Only after approval, copy the exact values from the still-current plan:
 node scripts/install-macos.js \
   --migrate \
   --extension-id EXTENSION_ID \
-  --expected-current-hash REVIEWED_CURRENT_SHA256
+  --expected-current-hash REVIEWED_CURRENT_SHA256 \
+  --reviewed-install-hash REVIEWED_INSTALL_SHA256
 ```
 
 Despite the historical `--migrate` flag name, Task 11 implements a preparation
-phase only. The installer re-reads both current registration files and refuses if their
-combined hash changed. It builds from clean committed local `HEAD` through
-fixed Git plumbing, never a remote, working-tree byte, package lifecycle hook,
-candidate entry point, dependency installer, or candidate-selected command.
+phase only. Immediately before its first write, the installer regenerates the
+whole plan from clean committed local `HEAD`, re-reads both current registration
+files, re-inspects the concrete Codex executable, and refuses unless the new
+install hash is exactly `REVIEWED_INSTALL_SHA256`. That hash binds the source,
+bundle, trusted bootstrap, generated runtime entry, executable identity,
+inventory, baseline, and proposed registration bytes. Fixed Git plumbing reads
+the committed tree; it never invokes a remote, working-tree byte, package
+lifecycle hook, candidate entry point, dependency installer, or
+candidate-selected command.
 
 The one-time transaction creates:
 
 - owner-only mode `0700` on the existing project-local `runtime/` custody root;
 - `runtime/versions/BUNDLE_DIGEST/` with the sealed complete V1 payload and
   canonical manifest;
-- `runtime/active/pin.json` with the first active digest;
+- `runtime/active/pin.json`, `runtime/recovery-state.json`, and
+  `runtime/installations/migration-v1.json` as one resolvable initial baseline;
 - `~/Library/Application Support/Resonant Sidecar/trusted-bootstrap/` with the
   separately pinned closed trust graph and generated concrete runtime adapter;
 - `~/Library/Application Support/Resonant Sidecar/extension/` as the stable
   unpacked-extension path;
+- `~/Library/Application Support/Resonant Sidecar/codex-review-home/` with mode
+  `0700`, dedicated to the pinned verifier;
 - `runtime/migration-recovery/CURRENT_HASH/` with the previous launcher,
   previous native-host manifest, and their exact before evidence;
-- `runtime/migration-receipts/CURRENT_HASH/` with immutable before, migration,
-  and file-verification records;
+- `runtime/migration-receipts/CURRENT_HASH/` with a separately verified chained
+  before/prepared/file-verification record set;
 - a proposed Chrome Dev native-host manifest in the reviewed plan only.
 
 The preparation never replaces the current launcher or Chrome Dev native-host
@@ -76,6 +89,14 @@ manifest. `migration-files-prepared` means the new pinned bytes and modes match
 the plan and the old registration still has the reviewed current hash. It is
 not a claim about the stable-path extension ID or a live process tree. Those
 claims belong to Task 12.
+
+The migration receipt chain is distinct from canonical lifecycle receipts in
+`review-receipts/`. Each migration receipt binds the reviewed install hash,
+source commit, current registration bytes/hashes, bundle and trusted-bootstrap
+digests, generated runtime-entry digest, exact inventory hash, and predecessor.
+It is preparation provenance, not an update-review approval or behavioral proof.
+The bundle gate is likewise a declaration/capability comparison; real protocol
+and continuity behavior remains a Task 12 integration check.
 
 ## Human Chrome Dev steps
 
@@ -141,10 +162,16 @@ collaboratively from that fixed location; the original V1 registration remains
 unchanged. A failed preparation should report only this journal/recovery
 location for later debugging.
 
+An interrupted preparation can leave sealed staging destinations beside that
+journal. Their presence is deliberate fail-closed crash evidence, not a signal
+to retry over them. Review the journal, the separately verified migration chain,
+and every planned destination before authoring a new recovery transaction. No
+Task 11 command performs automatic rollback or cleanup of that evidence.
+
 ## Receipt and debugging locations
 
 - Canonical update receipts: `review-receipts/`
-- One-time migration receipts: `runtime/migration-receipts/CURRENT_HASH/`
+- Separately verified migration chain: `runtime/migration-receipts/CURRENT_HASH/`
 - Original V1 recovery custody: `runtime/migration-recovery/CURRENT_HASH/`
 - Interrupted transaction marker: `runtime/migration-journal.json`
 - Human-readable failure report: the `report.md` inside the canonical receipt

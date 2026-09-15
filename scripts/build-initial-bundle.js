@@ -107,11 +107,22 @@ function artifacts(snapshot, names) {
 }
 function assertClosedImports(snapshot, names) {
   const allowed = new Set(names);
+  const trivia = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*`;
+  const staticImport = new RegExp(String.raw`\b(?:import|export)${trivia}(?:[^'";]*?\bfrom${trivia})?(['"])([^'"]+)\1`, 'g');
+  const dynamicImport = new RegExp(String.raw`\bimport${trivia}\(([^)]*)\)`, 'g');
   for (const name of names.filter(value => value.endsWith('.js'))) {
     const source = snapshot.get(name).bytes.toString('utf8');
-    const expressions = [...source.matchAll(/(?:from\s*|import\s*)['"](\.\.?\/[^'"]+)['"]/g)];
-    for (const match of expressions) {
-      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), match[1]));
+    const specifiers = [];
+    for (const match of source.matchAll(staticImport)) specifiers.push(match[2]);
+    for (const match of source.matchAll(dynamicImport)) {
+      const literal = match[1].trim().match(/^(['"])([^'"]+)\1$/);
+      if (!literal) fail(`non-literal dynamic import at ${name}`);
+      specifiers.push(literal[2]);
+    }
+    for (const specifier of specifiers) {
+      if (specifier.startsWith('node:')) continue;
+      if (!specifier.startsWith('./') && !specifier.startsWith('../')) fail(`ambient import in trusted import graph at ${name}`);
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier));
       if (!allowed.has(resolved)) fail(`trusted import graph escapes at ${name}`);
     }
   }
@@ -160,7 +171,7 @@ export async function inspectInitialBundle({ repoRoot, policy = PINNED_POLICY, g
     digest: sha256Json(trustedFiles.map(file => ({ path: file.relativePath, sha256: file.sha256, mode: file.mode }))),
   };
   const permissionMatch = canonicalJson(declared.chromePermissions) === canonicalJson([...policy.approvedCapabilities.chromePermissions].sort(compare)) && declared.hostPermissions.length === 0;
-  const behaviorComparison = {
+  const declarationComparison = {
     passed: permissionMatch && deps.runtime.length === 0 && declared.listeners.length === 0 && declared.lifecycleScripts.every(name => name === 'test'),
     checks: [
       { name: 'v1-permissions', passed: permissionMatch },
@@ -169,8 +180,8 @@ export async function inspectInitialBundle({ repoRoot, policy = PINNED_POLICY, g
       { name: 'v1-lifecycle-hooks', passed: declared.lifecycleScripts.every(name => name === 'test') },
     ],
   };
-  if (!behaviorComparison.passed) fail('V1 behavior comparison failed');
-  return Object.freeze({ sourceCommit, bundle: { manifest, files: bundleFiles }, trustedBootstrap, behaviorComparison });
+  if (!declarationComparison.passed) fail('V1 declaration comparison failed');
+  return Object.freeze({ sourceCommit, bundle: { manifest, files: bundleFiles }, trustedBootstrap, declarationComparison });
 }
 
 async function safeDestination(destination) {
@@ -220,7 +231,7 @@ export async function materializeInitialBundle({ inspection, destination } = {})
 
 async function main() {
   const result = await inspectInitialBundle({ repoRoot: projectRoot });
-  process.stdout.write(`${canonicalJson({ sourceCommit: result.sourceCommit, bundleDigest: result.bundle.manifest.bundleDigest, trustedBootstrapDigest: result.trustedBootstrap.digest, behaviorComparison: result.behaviorComparison, files: result.bundle.manifest.files })}\n`);
+  process.stdout.write(`${canonicalJson({ sourceCommit: result.sourceCommit, bundleDigest: result.bundle.manifest.bundleDigest, trustedBootstrapDigest: result.trustedBootstrap.digest, declarationComparison: result.declarationComparison, files: result.bundle.manifest.files })}\n`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

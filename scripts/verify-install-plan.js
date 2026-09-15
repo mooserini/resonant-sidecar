@@ -60,13 +60,13 @@ function verifyArtifactList(files, name, root) {
 }
 
 export function verifyInstallPlan(plan) {
-  exact(plan, ['schemaVersion', 'mode', 'browser', 'extensionId', 'expectedCurrentHash', 'sourceCommit', 'extensionIdentity', 'registration', 'runtimeDirectory', 'paths', 'before', 'bundle', 'trustedBootstrap', 'stableExtension', 'activePin', 'launcher', 'manifest', 'receipts', 'installHash'], 'plan');
+  exact(plan, ['schemaVersion', 'mode', 'browser', 'extensionId', 'expectedCurrentHash', 'sourceCommit', 'extensionIdentity', 'registration', 'runtimeDirectory', 'reviewHome', 'codexExecutable', 'paths', 'before', 'bundle', 'trustedBootstrap', 'runtimeEntry', 'stableExtension', 'activePin', 'baseline', 'launcher', 'manifest', 'inventoryHash', 'receipts', 'installHash'], 'plan');
   if (plan.schemaVersion !== 1 || plan.mode !== 'dry-run' || plan.browser !== 'Google Chrome Dev' || !EXTENSION_ID.test(plan.extensionId) || !SHA256.test(plan.expectedCurrentHash) || !COMMIT.test(plan.sourceCommit)) fail('identity');
-  exact(plan.paths, ['launcher', 'manifest', 'runtime', 'trustedBootstrap', 'stableExtension', 'activeVersion', 'activeBundle', 'activePin', 'recovery', 'migrationReceipts', 'journal'], 'paths');
+  exact(plan.paths, ['launcher', 'manifest', 'runtime', 'trustedBootstrap', 'stableExtension', 'reviewHome', 'activeVersion', 'activeBundle', 'activePin', 'recoveryState', 'installationWitness', 'recovery', 'migrationReceipts', 'journal'], 'paths');
   for (const [name, value] of Object.entries(plan.paths)) absolute(value, name);
   if (!plan.paths.manifest.includes('/Google/Chrome Dev/NativeMessagingHosts/') || plan.paths.manifest.includes('/Google/Chrome/NativeMessagingHosts/')) fail('browser target');
   if (new Set(Object.values(plan.paths)).size !== Object.keys(plan.paths).length) fail('path collision');
-  if (plan.paths.activeVersion !== path.join(plan.paths.runtime, 'versions', plan.bundle?.digest ?? '') || plan.paths.activeBundle !== path.join(plan.paths.activeVersion, 'bundle') || plan.paths.activePin !== path.join(plan.paths.runtime, 'active', 'pin.json') || !plan.paths.recovery.startsWith(`${plan.paths.runtime}${path.sep}`) || !plan.paths.recovery.endsWith(plan.expectedCurrentHash) || !plan.paths.migrationReceipts.startsWith(`${plan.paths.runtime}${path.sep}`) || plan.paths.journal !== path.join(plan.paths.runtime, 'migration-journal.json')) fail('path containment');
+  if (plan.paths.activeVersion !== path.join(plan.paths.runtime, 'versions', plan.bundle?.digest ?? '') || plan.paths.activeBundle !== path.join(plan.paths.activeVersion, 'bundle') || plan.paths.activePin !== path.join(plan.paths.runtime, 'active', 'pin.json') || plan.paths.recoveryState !== path.join(plan.paths.runtime, 'recovery-state.json') || plan.paths.installationWitness !== path.join(plan.paths.runtime, 'installations', 'migration-v1.json') || !plan.paths.recovery.startsWith(`${plan.paths.runtime}${path.sep}`) || !plan.paths.recovery.endsWith(plan.expectedCurrentHash) || !plan.paths.migrationReceipts.startsWith(`${plan.paths.runtime}${path.sep}`) || plan.paths.journal !== path.join(plan.paths.runtime, 'migration-journal.json')) fail('path containment');
 
   exact(plan.extensionIdentity, ['expectedId', 'observedStablePathId', 'state'], 'extension identity');
   if (plan.extensionIdentity.expectedId !== plan.extensionId || plan.extensionIdentity.observedStablePathId !== null || plan.extensionIdentity.state !== 'unverified') fail('extension identity proof');
@@ -74,6 +74,11 @@ export function verifyInstallPlan(plan) {
   if (plan.registration.state !== 'unchanged-pending-stable-id-proof' || !SHA256.test(plan.registration.launcherSha256) || !SHA256.test(plan.registration.manifestSha256)) fail('registration state');
   exact(plan.runtimeDirectory, ['destination', 'mode'], 'runtime directory');
   if (plan.runtimeDirectory.destination !== plan.paths.runtime || plan.runtimeDirectory.mode !== 0o700) fail('runtime directory custody');
+  exact(plan.reviewHome, ['destination', 'mode'], 'review home');
+  if (plan.reviewHome.destination !== plan.paths.reviewHome || plan.reviewHome.mode !== 0o700) fail('review home custody');
+  exact(plan.codexExecutable, ['path', 'bytes', 'sha256', 'mode'], 'Codex executable');
+  absolute(plan.codexExecutable.path, 'Codex executable');
+  if (!Number.isSafeInteger(plan.codexExecutable.bytes) || plan.codexExecutable.bytes < 1 || !SHA256.test(plan.codexExecutable.sha256) || !Number.isInteger(plan.codexExecutable.mode) || (plan.codexExecutable.mode & 0o111) === 0 || (plan.codexExecutable.mode & 0o022) !== 0) fail('Codex executable custody');
 
   exact(plan.before, ['currentHash', 'launcher', 'manifest'], 'before');
   if (plan.before.currentHash !== plan.expectedCurrentHash) fail('stale expected hash');
@@ -101,6 +106,18 @@ export function verifyInstallPlan(plan) {
   try { pin = JSON.parse(plan.activePin.contents); } catch { fail('active pin JSON'); }
   if (!plain(pin) || canonicalJson(pin) + '\n' !== plan.activePin.contents || pin.schemaVersion !== 1 || pin.digest !== plan.bundle.digest || pin.reviewId !== 'migration-v1' || Object.keys(pin).sort().join(',') !== 'digest,reviewId,schemaVersion') fail('active pin contents');
   if (!plan.bundle.files.some(file => file.path === 'native-host/host.js') || !plan.trustedBootstrap.files.some(file => file.path === 'bootstrap/host.js')) fail('runtime entry graph');
+  exact(plan.runtimeEntry, ['contents', 'bytes', 'sha256', 'mode', 'destination'], 'runtime entry');
+  if (plan.runtimeEntry.destination !== path.join(plan.paths.trustedBootstrap, 'runtime-entry.js') || plan.runtimeEntry.mode !== 0o400 || plan.runtimeEntry.bytes !== Buffer.byteLength(plan.runtimeEntry.contents) || plan.runtimeEntry.sha256 !== sha256Bytes(plan.runtimeEntry.contents) || plan.runtimeEntry.sha256 !== plan.trustedBootstrap.entryDigest || !plan.runtimeEntry.contents.includes(`\"codexPath\":\"${plan.codexExecutable.path}\"`) || !plan.runtimeEntry.contents.includes('root: input.active.bundleRoot')) fail('runtime entry binding');
+  const entryInInventory = plan.trustedBootstrap.files.find(file => file.path === 'runtime-entry.js');
+  if (!entryInInventory || entryInInventory.sha256 !== plan.runtimeEntry.sha256 || entryInInventory.bytes !== plan.runtimeEntry.bytes || entryInInventory.destination !== plan.runtimeEntry.destination) fail('runtime entry inventory');
+  exact(plan.baseline, ['recoveryState', 'installationWitness'], 'baseline');
+  for (const [name, item, expectedDestination, expectedMode] of [['recovery state', plan.baseline.recoveryState, plan.paths.recoveryState, 0o600], ['installation witness', plan.baseline.installationWitness, plan.paths.installationWitness, 0o400]]) {
+    exact(item, ['contents', 'bytes', 'sha256', 'mode', 'destination'], name);
+    if (item.destination !== expectedDestination || item.mode !== expectedMode || item.bytes !== Buffer.byteLength(item.contents) || item.sha256 !== sha256Bytes(item.contents)) fail(`${name} artifact`);
+  }
+  let recoveryState; let installationWitness;
+  try { recoveryState = JSON.parse(plan.baseline.recoveryState.contents); installationWitness = JSON.parse(plan.baseline.installationWitness.contents); } catch { fail('baseline JSON'); }
+  if (canonicalJson(recoveryState) + '\n' !== plan.baseline.recoveryState.contents || canonicalJson(installationWitness) + '\n' !== plan.baseline.installationWitness.contents || canonicalJson(installationWitness) !== canonicalJson(pin) || recoveryState.phase !== 'complete' || canonicalJson(recoveryState.candidate) !== canonicalJson(pin) || recoveryState.previous !== null || recoveryState.priorPrevious !== null || recoveryState.failureRef !== null || !SHA256.test(recoveryState.decisionHash)) fail('baseline state');
 
   exact(plan.launcher, ['contents', 'sha256', 'mode'], 'launcher');
   if (plan.launcher.mode !== 0o700 || plan.launcher.sha256 !== sha256Bytes(plan.launcher.contents) || !plan.launcher.contents.includes(`${plan.paths.trustedBootstrap}/runtime-entry.js`) || /native-host\/host\.js/.test(plan.launcher.contents)) fail('launcher authority');
@@ -108,12 +125,25 @@ export function verifyInstallPlan(plan) {
   if (plan.manifest.mode !== 0o600 || plan.manifest.sha256 !== sha256Bytes(`${canonicalJson(plan.manifest.contents)}\n`)) fail('manifest digest');
   exact(plan.manifest.contents, ['name', 'description', 'path', 'type', 'allowed_origins'], 'manifest contents');
   if (plan.manifest.contents.name !== 'com.resonantmirror.sidecar' || plan.manifest.contents.path !== plan.paths.launcher || plan.manifest.contents.type !== 'stdio' || canonicalJson(plan.manifest.contents.allowed_origins) !== canonicalJson([`chrome-extension://${plan.extensionId}/`])) fail('native manifest');
-  for (const receipt of Object.values(plan.receipts)) {
-    exact(receipt, ['schemaVersion', 'eventType', 'sourceCommit', 'currentHash', 'bundleDigest', 'trustedBootstrapDigest'], 'migration receipt');
-    if (receipt.schemaVersion !== 1 || receipt.sourceCommit !== plan.sourceCommit || receipt.currentHash !== plan.expectedCurrentHash || receipt.bundleDigest !== plan.bundle.digest || receipt.trustedBootstrapDigest !== plan.trustedBootstrap.digest) fail('migration receipt');
+  if (!SHA256.test(plan.inventoryHash)) fail('inventory hash');
+  const inventory = [...plan.bundle.files, ...plan.trustedBootstrap.files, ...plan.stableExtension.files, plan.bundle.manifestArtifact, plan.activePin, plan.baseline.recoveryState, plan.baseline.installationWitness].map(({ path: artifactPath, destination, bytes, sha256, mode }) => ({ path: artifactPath ?? path.relative(plan.paths.runtime, destination), destination, bytes, sha256, mode })).sort((a, b) => Buffer.compare(Buffer.from(a.destination), Buffer.from(b.destination)));
+  if (plan.inventoryHash !== sha256Json(inventory)) fail('inventory hash');
+  const approval = { ...plan }; delete approval.installHash; delete approval.receipts;
+  if (plan.installHash !== sha256Json(approval)) fail('install hash');
+  exact(plan.receipts, ['before', 'migration', 'after'], 'migration receipts');
+  let predecessor = null;
+  for (const [name, eventType] of [['before', 'migration-before'], ['migration', 'migration-prepared'], ['after', 'migration-files-prepared']]) {
+    const receipt = plan.receipts[name];
+    exact(receipt, ['schemaVersion', 'eventType', 'installHash', 'sourceCommit', 'currentHash', 'bundleDigest', 'trustedBootstrapDigest', 'stableExtensionDigest', 'runtimeEntryDigest', 'inventoryHash', 'inventory', 'registration', 'previousReceiptHash', 'receiptHash'], 'migration receipt');
+    exact(receipt.registration, ['launcher', 'manifest'], 'migration registration');
+    for (const [kind, item] of Object.entries(receipt.registration)) {
+      exact(item, ['path', 'bytes', 'sha256', 'mode'], `migration ${kind}`);
+      if (canonicalJson(item) !== canonicalJson(plan.before[kind])) fail('migration registration');
+    }
+    const unsignedReceipt = { ...receipt }; delete unsignedReceipt.receiptHash;
+    if (receipt.schemaVersion !== 1 || receipt.eventType !== eventType || receipt.installHash !== plan.installHash || receipt.sourceCommit !== plan.sourceCommit || receipt.currentHash !== plan.expectedCurrentHash || receipt.bundleDigest !== plan.bundle.digest || receipt.trustedBootstrapDigest !== plan.trustedBootstrap.digest || receipt.stableExtensionDigest !== plan.stableExtension.digest || receipt.runtimeEntryDigest !== plan.runtimeEntry.sha256 || receipt.inventoryHash !== plan.inventoryHash || canonicalJson(receipt.inventory) !== canonicalJson(inventory) || receipt.previousReceiptHash !== predecessor || receipt.receiptHash !== sha256Json(unsignedReceipt)) fail('migration receipt chain');
+    predecessor = receipt.receiptHash;
   }
-  const unsigned = { ...plan }; delete unsigned.installHash;
-  if (plan.installHash !== sha256Json(unsigned)) fail('install hash');
   return plan;
 }
 

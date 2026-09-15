@@ -7,7 +7,7 @@ import test from 'node:test';
 import { runCodexReview } from '../review/codex-verifier.js';
 import { buildCodexReviewPrompt } from '../review/codex-prompt.js';
 import { buildBundleManifest } from '../review/bundle-manifest.js';
-import { sha256Json } from '../review/canonical-json.js';
+import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { sanitizeEvidence } from '../review/redaction.js';
 import { ReceiptStore } from '../review/receipt-store.js';
 import { eventsFor, fakeCodex, favorable } from './fixtures/fake-codex-exec.js';
@@ -28,12 +28,62 @@ async function inputFor(t, overrides = {}) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const trustedCodexHome = path.join(root, 'codex-home');
   await mkdir(trustedCodexHome, { mode: 0o700 });
+  const requestedRunner = Object.hasOwn(overrides, 'runner') ? overrides.runner : fakeCodex();
+  const rawRunner = overrides.rawRunner === true;
+  const rest = { ...overrides }; delete rest.runner; delete rest.rawRunner;
+  const runner = requestedRunner && !rawRunner ? async invocation => {
+    if (!invocation.args.includes('--version')) {
+      const identity = { pid: process.pid, executablePath: await realpath(process.execPath), executableSha256: sha256Bytes(await readFile(await realpath(process.execPath))) };
+      await invocation.sampleVerifier(identity);
+    }
+    return requestedRunner(invocation);
+  } : requestedRunner;
   return { active: manifest, candidate: manifest, diff: '', policy, schema,
     deterministic: { passed: true, checks: [{ name: 'schema', passed: true }], policySnapshotHash: sha256Json(policy),
       activeBundleDigest: manifest.bundleDigest, candidateBundleDigest: manifest.bundleDigest },
-    codexPath: await realpath(process.execPath), trustedCodexHome, runner: fakeCodex(),
-    finalizeResult: async () => {}, ...overrides };
+    codexPath: await realpath(process.execPath), trustedCodexHome, runner,
+    sampleVerifier: async identity => ({ ...identity, evidenceDigest: 'e'.repeat(64) }),
+    finalizeResult: async () => {}, ...rest };
 }
+
+test('samples the actual verifier child while it is live and binds its exact PID and executable identity', async t => {
+  const input = await inputFor(t, { runner: undefined });
+  const executable = path.join(path.dirname(input.trustedCodexHome), 'fake-codex-live');
+  await writeFile(executable, `#!${process.execPath}\nimport { runFakeProcess } from ${JSON.stringify(new URL('./fixtures/fake-codex-exec.js', import.meta.url).href)};\nawait runFakeProcess('pass');\n`, { mode: 0o700 });
+  input.codexPath = executable;
+  let observed;
+  input.sampleVerifier = async identity => {
+    process.kill(identity.pid, 0);
+    assert.equal(identity.executablePath, executable);
+    assert.equal(identity.executableSha256, sha256Bytes(await readFile(executable)));
+    observed = identity;
+    return { ...identity, evidenceDigest: 'a'.repeat(64) };
+  };
+  const result = await runCodexReview(input);
+  assert.equal(result.passed, true);
+  assert.ok(Number.isSafeInteger(observed.pid));
+  assert.ok(result.verifierIdentities.some(item => item.name === 'codex-process-evidence' && item.sha256 === sha256Json({ ...observed, evidenceDigest: 'a'.repeat(64) })));
+});
+
+for (const mode of ['missing', 'mismatch', 'duplicate', 'late']) test(`fails closed on ${mode} live-verifier evidence`, async t => {
+  const input = await inputFor(t, { rawRunner: true });
+  if (mode === 'mismatch') input.sampleVerifier = async identity => ({ ...identity, pid: identity.pid + 1, evidenceDigest: 'e'.repeat(64) });
+  const base = fakeCodex();
+  input.runner = async invocation => {
+    if (invocation.args.includes('--version')) return base(invocation);
+    const identity = { pid: process.pid, executablePath: input.codexPath, executableSha256: sha256Bytes(await readFile(input.codexPath)) };
+    if (!['missing', 'late'].includes(mode)) {
+      const sampled = await invocation.sampleVerifier(identity);
+      if (mode === 'duplicate') await invocation.sampleVerifier(identity);
+      if (mode === 'mismatch') return base(invocation);
+    }
+    const output = await base(invocation);
+    if (mode === 'late') setImmediate(() => invocation.sampleVerifier(identity).catch(() => {}));
+    return output;
+  };
+  const result = await runCodexReview(input);
+  assert.equal(result.passed, false);
+});
 
 test('launches only fixed authority, stdin evidence, sealed input and private output; finalizes before cleanup', async t => {
   let invocation; let finalized; let outputFile; let inputDir;

@@ -12,7 +12,7 @@ import { DecisionNonces } from '../review/decision-nonce.js';
 import { ReviewCoordinator } from '../review/review-coordinator.js';
 import { runBootstrap } from '../bootstrap/host.js';
 import { encodeNativeMessage } from '../native-host/native-framing.js';
-import { sha256Json } from '../review/canonical-json.js';
+import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { collectMacOSEvidence } from '../review/macos-evidence.js';
 import { policy as osPolicy, runner } from './fixtures/macos/fixture.js';
 
@@ -34,8 +34,21 @@ async function liveFixture(t) {
   const deps = { receiptStore: receipts, nonceStore: new DecisionNonces({ root: f.root }), versionStore: store, policy, reviewId: () => 'next', runtime,
     candidateSource: { inspect: async () => ({ state: 'available', digest: next.manifest.bundleDigest }), stage: async () => next },
     deterministicReview: async () => ({ passed: true, checks: [{ name: 'trusted-tests', passed: true }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: next.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) }),
-    codexReview: async input => { const r = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: next.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) }; await input.finalizeResult(r); return r; },
-    ownershipPolicy: phase => osPolicy(phase),
+    codexReview: async input => {
+      const identity = { pid: 105, executablePath: '/usr/bin/true', executableSha256: sha256Bytes(readFileSync('/usr/bin/true')) };
+      const binding = await input.sampleVerifier(identity);
+      const r = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, verifierIdentities: [{ name: 'codex-process-evidence', sha256: sha256Json(binding) }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: next.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) };
+      await input.finalizeResult(r); return r;
+    },
+    ownershipPolicy: (phase, live) => {
+      const value = osPolicy(phase);
+      if (phase === 'verification' && live?.verifier) {
+        const verifier = value.processes.find(process => process.name === 'verifier');
+        verifier.pid = live.verifier.pid;
+        verifier.executablePath = live.verifier.executablePath;
+      }
+      return value;
+    },
     collectEvidence: async input => { const e = await collectMacOSEvidence({ ...input, runner: runner().run }); if (input.phase === 'after' && failAfter) { failAfter = false; e.processes.find(p => p.name === 'active-host').listeners.push({ fd: 17, protocol: 'TCP', address: '127.0.0.1', port: 9000, transport: 'tcp' }); } return e; },
   };
   coordinator = new ReviewCoordinator(deps);

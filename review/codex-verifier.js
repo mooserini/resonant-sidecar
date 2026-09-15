@@ -104,11 +104,11 @@ function eventParser() {
 async function boundedRun(invocation) {
   return new Promise(resolve => {
     let timer; let child; let total = 0; let pending = Buffer.alloc(0);
-    let timedOut = false; let outputLimitExceeded = false; let eventRejected = false;
+    let timedOut = false; let outputLimitExceeded = false; let eventRejected = false; let sampleRejected = false;
     const stdout = []; const stderr = []; const parser = eventParser();
     const finish = exitCode => {
       clearTimeout(timer);
-      resolve({ exitCode, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), timedOut, outputLimitExceeded, eventRejected });
+      resolve({ exitCode, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), timedOut, outputLimitExceeded, eventRejected, sampleRejected });
     };
     const stop = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } };
     try {
@@ -132,7 +132,13 @@ async function boundedRun(invocation) {
     child.once('error', () => finish(-1));
     child.once('close', code => finish(Number.isInteger(code) ? code : -1));
     child.stdin.on('error', () => {});
-    child.stdin.end(invocation.input);
+    const start = async () => {
+      try {
+        if (typeof invocation.sampleVerifier === 'function') await invocation.sampleVerifier({ pid: child.pid, executablePath: invocation.command, executableSha256: invocation.executableSha256 });
+        child.stdin.end(invocation.input);
+      } catch { sampleRejected = true; stop(); }
+    };
+    start();
   });
 }
 
@@ -158,7 +164,7 @@ async function trustedPaths(codexPath, codexHome) {
  * attestation and project.testResults. This function never writes a receipt.
  */
 export async function runCodexReview(input = {}) {
-  if (typeof input.finalizeResult !== 'function') return failure('finalization-required');
+  if (typeof input.finalizeResult !== 'function' || typeof input.sampleVerifier !== 'function') return failure('finalization-required');
   let result = failure('input-invalid');
   let temporary; let outputHandle; let inputDirectory; let inputHandle;
   try {
@@ -186,21 +192,36 @@ export async function runCodexReview(input = {}) {
     const outputPath = path.join(temporary, 'last-message.json');
     outputHandle = await open(outputPath, 'wx+', 0o600);
     const original = await outputHandle.stat();
+    let sampleOpen = true; let sampleCount = 0; let verificationBinding = null;
+    const sampleVerifier = async identity => {
+      requireValue(sampleOpen && sampleCount++ === 0);
+      exact(identity, ['pid', 'executablePath', 'executableSha256']);
+      requireValue(Number.isSafeInteger(identity.pid) && identity.pid > 0 && identity.executablePath === input.codexPath && identity.executableSha256 === executableDigest);
+      const returned = await input.sampleVerifier(structuredClone(identity));
+      exact(returned, ['pid', 'executablePath', 'executableSha256', 'evidenceDigest']);
+      requireValue(returned.pid === identity.pid && returned.executablePath === identity.executablePath && returned.executableSha256 === identity.executableSha256 && /^[a-f0-9]{64}$/.test(returned.evidenceDigest));
+      verificationBinding = returned;
+      return structuredClone(returned);
+    };
     const invocation = { command: input.codexPath, args: [...FIXED_ARGS, '-C', inputDirectory, '--output-schema', schemaPath, '--output-last-message', outputPath, '-'],
       input: prompt, cwd: inputDirectory, shell: false, timeoutMs: TIMEOUT_MS, maxOutputBytes: MAX_EVENTS,
+      executableSha256: executableDigest, sampleVerifier,
       env: { CODEX_HOME: input.trustedCodexHome, HOME: temporary, PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' } };
     // Hash identities with fixed placeholders, never persist temp/home paths.
     const identities = [{ name: 'codex-executable', sha256: executableDigest },
       { name: 'codex-command', sha256: sha256Json([...FIXED_ARGS, '-C', '<sealed-input>', '--output-schema', '<trusted-schema>', '--output-last-message', '<private-output>', '-']) },
       { name: 'codex-input', sha256: sha256Bytes(prompt) }, { name: 'codex-schema', sha256: sha256Json(SCHEMA) }];
     result = { ...failure('codex-version-invalid'), verifierIdentities: identities };
-    const version = await (input.runner ?? boundedRun)({ ...invocation, args: ['--version'], input: '', auditEvents: false, timeoutMs: 5000, maxOutputBytes: 4096 });
+    const version = await (input.runner ?? boundedRun)({ ...invocation, args: ['--version'], input: '', auditEvents: false, timeoutMs: 5000, maxOutputBytes: 4096, sampleVerifier: undefined });
     requireValue(version && version.exitCode === 0 && Buffer.isBuffer(version.stdout) && Buffer.isBuffer(version.stderr) && version.stdout.length + version.stderr.length <= 4096 && !version.timedOut && !version.outputLimitExceeded);
     const versionText = UTF8.decode(version.stdout);
     requireValue(/^codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?\n?$/.test(versionText));
     identities.push({ name: 'codex-version', sha256: sha256Bytes(version.stdout) });
     result = { ...failure('codex-execution-failed'), verifierIdentities: identities };
     const output = await (input.runner ?? boundedRun)(invocation);
+    sampleOpen = false;
+    requireValue(sampleCount === 1 && verificationBinding !== null && output?.sampleRejected !== true);
+    identities.push({ name: 'codex-process-evidence', sha256: sha256Json(verificationBinding) });
     const directoryNow = await lstat(inputDirectory);
     const directoryHeld = await inputHandle.stat();
     requireValue(directoryNow.isDirectory() && !directoryNow.isSymbolicLink() && directoryNow.ino === directoryHeld.ino && directoryNow.dev === directoryHeld.dev && (directoryNow.mode & 0o777) === 0o500);

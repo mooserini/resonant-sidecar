@@ -134,11 +134,22 @@ export class ReviewCoordinator {
       if (!this.#boundResult(deterministic) || !Array.isArray(deterministic.checks) || deterministic.checks.length === 0 || deterministic.checks.some(c => c.passed !== true)) {
         await this.#move('review-failed', 'deterministic-failed'); return this.#view();
       }
-      await this.#evidence('verification', this.#d.runtime.snapshot());
       let finalized = false;
-      const codex = await this.#d.codexReview({ ...this.#d.codexInput, active: clone(this.#active.manifest), candidate: clone(this.#staged.manifest), deterministic, policy: clone(POLICY), finalizeResult: async result => {
+      let verificationBinding = null;
+      const sampleVerifier = async identity => {
+        if (verificationBinding !== null || !identity || Object.keys(identity).sort().join(',') !== 'executablePath,executableSha256,pid' || !Number.isSafeInteger(identity.pid) || identity.pid < 1 || typeof identity.executablePath !== 'string' || !digest(identity.executableSha256)) throw new Error('Invalid verifier process binding');
+        const runtime = this.#d.runtime.snapshot();
+        const evidence = await this.#evidence('verification', { ...runtime, verifier: clone(identity) });
+        const process = evidence.processes?.find(item => item.name === 'verifier');
+        if (!process || process.pid !== identity.pid || process.executableDigest !== identity.executableSha256) throw new Error('Verifier evidence identity mismatch');
+        verificationBinding = { ...clone(identity), evidenceDigest: sha256Json(evidence) };
+        return clone(verificationBinding);
+      };
+      const boundVerification = result => verificationBinding !== null && result?.verifierIdentities?.some(identity => identity?.name === 'codex-process-evidence' && identity.sha256 === sha256Json(verificationBinding));
+      const codex = await this.#d.codexReview({ ...this.#d.codexInput, active: clone(this.#active.manifest), candidate: clone(this.#staged.manifest), deterministic, policy: clone(POLICY), sampleVerifier, finalizeResult: async result => {
         if (finalized) throw new Error('Duplicate Codex finalization');
         const safe = sanitizeEvidence(result, POLICY);
+        if (!boundVerification(safe)) throw new Error('Unbound verifier evidence');
         this.#attestation = safe.attestation ?? null;
         this.#project.testResults.verifierIdentities = [...(this.#project.testResults.verifierIdentities ?? []), ...(safe.verifierIdentities ?? [])];
         this.#project.testResults.checks.push({ name: 'codex-result', passed: safe.passed === true, ...(digest(safe.outputDigest) ? { outputDigest: safe.outputDigest } : {}) });
@@ -147,7 +158,7 @@ export class ReviewCoordinator {
       if (!finalized) await this.#move('codex-review');
       // Task 5 can downgrade its result during cleanup AFTER finalizeResult.
       // Only its final return can grant eligibility.
-      if (!finalized || !this.#boundResult(codex) || codex.reasonCode !== 'codex-favorable' || codex.attestation?.verdict !== 'favorable' || canonicalJson(codex.attestation) !== canonicalJson(this.#attestation)) {
+      if (!finalized || !boundVerification(codex) || !this.#boundResult(codex) || codex.reasonCode !== 'codex-favorable' || codex.attestation?.verdict !== 'favorable' || canonicalJson(codex.attestation) !== canonicalJson(this.#attestation)) {
         const reason = codex?.reasonCode === 'cleanup-failed' ? 'cleanup-failed' : 'codex-failed';
         await this.#move('review-failed', reason); return this.#view();
       }

@@ -47,10 +47,29 @@ test('inspects a clean committed complete bundle and closed trusted bootstrap gr
   assert.equal(result.sourceCommit, COMMIT);
   assert.deepEqual(result.bundle.manifest.files.map(file => file.path), [...policy.approvedBundlePaths].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))));
   assert.deepEqual(result.trustedBootstrap.files.map(file => file.relativePath), [...TRUSTED_BOOTSTRAP_FILES].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))));
-  assert.equal(result.behaviorComparison.passed, true);
-  assert.ok(result.behaviorComparison.checks.some(check => check.name === 'v1-permissions' && check.passed));
+  assert.equal(result.declarationComparison.passed, true);
+  assert.ok(result.declarationComparison.checks.some(check => check.name === 'v1-permissions' && check.passed));
   assert.equal(fake.calls.some(args => ['fetch', 'pull', 'clone', 'checkout'].includes(args[0])), false);
   assert.equal(fake.calls.every(args => args[0] !== 'show' || args[1].startsWith(`${COMMIT}:`)), true);
+});
+
+for (const [name, source, pattern] of [
+  ['bare static import', "import value from 'ambient-package';\n", /ambient|import graph/i],
+  ['bare export-from', "export { value } from 'ambient-package';\n", /ambient|import graph/i],
+  ['bare dynamic import', "await import('ambient-package');\n", /ambient|import graph/i],
+  ['comment-separated static import', "import/* gap */ value from 'ambient-package';\n", /ambient|import graph/i],
+  ['comment-separated dynamic import', "await import /* gap */ ('ambient-package');\n", /ambient|import graph/i],
+  ['non-literal dynamic import', "const target = './host.js'; await import(target);\n", /non-literal|import graph/i],
+  ['unlisted relative dynamic import', "await import('./not-pinned.js');\n", /escapes|import graph/i],
+]) test(`trusted closure rejects ${name}`, async () => {
+  const files = repositoryFiles(); files['bootstrap/host.js'] = source;
+  await assert.rejects(() => inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git }), pattern);
+});
+
+test('trusted closure allows only explicit node builtins and pinned literal relatives', async () => {
+  const files = repositoryFiles();
+  files['bootstrap/host.js'] = "import { readFile } from 'node:fs/promises';\nexport { default as proxy } from './native-proxy.js';\nawait import('../review/canonical-json.js');\nvoid readFile;\n";
+  assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);
 });
 
 test('refuses dirty source, changed HEAD, missing graph entries, symlink modes, and lifecycle hooks', async () => {

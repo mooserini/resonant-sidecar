@@ -59,26 +59,37 @@ and manifest, then prints exact paths, SHA-256 digests, file modes, the one
 allowed origin, and the proposed install hash. It does not write staging data,
 registration, receipts, or runtime state.
 
-A preparation transaction requires all three explicit arguments from the
+A preparation transaction requires the complete explicit approval tuple from the
 reviewed plan:
 
 ```sh
 node scripts/install-macos.js \
   --migrate \
   --extension-id EXTENSION_ID \
-  --expected-current-hash REVIEWED_SHA256
+  --expected-current-hash REVIEWED_CURRENT_SHA256 \
+  --reviewed-install-hash REVIEWED_INSTALL_SHA256
 ```
 
 Do not run that command before the Task 12 checkpoint. The preparation pins the
 complete V1 payload in the project-local version store, installs a separate
 closed trusted-bootstrap graph, creates a stable unpacked-extension directory,
-and preserves the old launcher and manifest read-only. It does **not** change
+creates an owner-only Codex review home, seeds a self-consistent active pin,
+recovery state, and installation witness, and preserves the old launcher and
+manifest read-only. Immediately before its first write, the installer rebuilds
+the plan from clean committed `HEAD`, re-inspects the concrete non-symlink Codex
+executable and current registration, and requires the regenerated install hash
+to equal `REVIEWED_INSTALL_SHA256`. It does **not** change
 the live Chrome Dev native-host registration. An unpacked extension loaded from
 a new path is not assumed to retain its ID: Task 12 must load the stable path,
 record the ID Chrome Dev actually displays, and stop unless it exactly matches
 the reviewed expected ID. Only a later, separately reviewed registration step
 may point Chrome Dev at the pinned bootstrap. Nothing targets Chrome Stable or
 adds a listener, capability, or Chrome permission.
+
+The bundle builder performs a declaration/capability comparison against the
+canonical policy; it does not claim to have compared live behavior. Its closed
+trusted import graph permits explicit `node:` built-ins and rejects ambient
+packages, unresolved relative imports, and non-literal dynamic imports.
 
 See [docs/migration-runbook.md](docs/migration-runbook.md) for the exact human
 boundary, recovery procedure, process tree, and receipt locations.

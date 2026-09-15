@@ -39,11 +39,22 @@ async function coordinatorFixture(t, options = {}) {
     candidateSource: { inspect: async () => ({ state: 'available', manifest: staged.manifest }), stage: async () => staged },
     deterministicReview: async () => ({ passed: true, checks: [{ name: 'trusted-tests', passed: true }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) }),
     codexReview: async input => {
-      effects.push('codex'); const result = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, outputDigest: sha256Json(favorable), verifierIdentities: [{ name: 'codex-executable', sha256: 'c'.repeat(64) }, { name: 'codex-version', sha256: 'd'.repeat(64) }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) };
+      effects.push('codex');
+      const identity = { pid: 105, executablePath: '/usr/bin/true', executableSha256: sha256Bytes(readFileSync('/usr/bin/true')) };
+      const binding = await input.sampleVerifier(identity);
+      const result = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, outputDigest: sha256Json(favorable), verifierIdentities: [{ name: 'codex-executable', sha256: 'c'.repeat(64) }, { name: 'codex-version', sha256: 'd'.repeat(64) }, { name: 'codex-process-evidence', sha256: sha256Json(binding) }], activeBundleDigest: first.manifest.bundleDigest, candidateBundleDigest: staged.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) };
       await input.finalizeResult(result); return result;
     },
     collectEvidence: input => collectMacOSEvidence({ ...input, runner: runner().run }),
-    ownershipPolicy: phase => osPolicy(phase),
+    ownershipPolicy: (phase, runtime) => {
+      const value = osPolicy(phase);
+      if (phase === 'verification' && runtime?.verifier) {
+        const verifier = value.processes.find(process => process.name === 'verifier');
+        verifier.pid = runtime.verifier.pid;
+        verifier.executablePath = runtime.verifier.executablePath;
+      }
+      return value;
+    },
     runtime: {
       withTransition: operation => operation(deps.runtime),
       snapshot: () => ({ ...runtimeState }),
@@ -60,6 +71,30 @@ async function coordinatorFixture(t, options = {}) {
     events: async () => (await receiptStore.verifyChain()).receipts.map(r => r.eventType),
   };
 }
+
+test('coordinator grants eligibility only with one live verifier sample bound to evidence and result', async t => {
+  const f = await coordinatorFixture(t);
+  const eligible = await f.coordinator.startReview();
+  assert.equal(eligible.state, 'eligible');
+  const chain = await f.receiptStore.verifyChain();
+  const codexReceipt = chain.receipts.find(receipt => receipt.eventType === 'codex-review');
+  const osEvidence = JSON.parse(await readFile(path.join(codexReceipt.directory, 'os/verification/evidence.json')));
+  assert.equal(osEvidence.processes.find(process => process.name === 'verifier').pid, 105);
+});
+
+for (const mode of ['missing', 'duplicate', 'mismatch']) test(`coordinator refuses eligibility for ${mode} verifier evidence`, async t => {
+  const f = await coordinatorFixture(t);
+  f.deps.codexReview = async input => {
+    const identity = { pid: 105, executablePath: '/usr/bin/true', executableSha256: sha256Bytes(readFileSync('/usr/bin/true')) };
+    let binding;
+    if (mode !== 'missing') binding = await input.sampleVerifier(identity);
+    if (mode === 'duplicate') await input.sampleVerifier(identity);
+    const result = { passed: true, reasonCode: 'codex-favorable', attestation: favorable, outputDigest: sha256Json(favorable), verifierIdentities: [{ name: 'codex-process-evidence', sha256: sha256Json(mode === 'mismatch' ? { ...binding, pid: 999 } : binding) }], activeBundleDigest: f.first.manifest.bundleDigest, candidateBundleDigest: f.staged.manifest.bundleDigest, policySnapshotHash: sha256Json(policy) };
+    await input.finalizeResult(result); return result;
+  };
+  const coordinator = new ReviewCoordinator(f.deps);
+  assert.notEqual((await coordinator.startReview()).state, 'eligible');
+});
 
 test('review retains A until bound acceptance and records all eight immutable transitions', async t => {
   const f = await coordinatorFixture(t); const eligible = await f.coordinator.startReview();

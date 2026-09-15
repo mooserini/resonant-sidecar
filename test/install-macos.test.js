@@ -1,18 +1,20 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
 import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
-import { buildInstallPlan, migrateInstallation, parseInstallerArgs } from '../scripts/install-macos.js';
+import { VersionStore } from '../bootstrap/version-store.js';
+import { buildInstallPlan, inspectExecutable, migrateInstallation, parseInstallerArgs } from '../scripts/install-macos.js';
 import { inspectCurrentInstallation, verifyInstallPlan } from '../scripts/verify-install-plan.js';
 
 const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const COMMIT = 'b'.repeat(40);
 const execFileAsync = promisify(execFile);
+const codexIdentity = executable => ({ path: executable, bytes: 7, sha256: '9'.repeat(64), mode: 0o700 });
 
 function currentIdentity(launcherPath, manifestPath, launcher = 'old', manifest = 'old-manifest') {
   const value = {
@@ -50,30 +52,46 @@ function sourceInspection() {
     sourceCommit: COMMIT,
     bundle: { manifest, files: bundleFiles },
     trustedBootstrap: { digest: sha256Json(trustedFiles.map(({ relativePath, sha256, mode }) => ({ path: relativePath, sha256, mode }))), files: trustedFiles },
-    behaviorComparison: { passed: true, checks: [{ name: 'v1-capabilities', passed: true }] },
+    declarationComparison: { passed: true, checks: [{ name: 'v1-capabilities', passed: true }] },
   };
 }
 
 test('migration requires the exact explicit confirmation triple', () => {
   const currentHash = 'a'.repeat(64);
-  assert.deepEqual(parseInstallerArgs([]), { migrate: false, extensionId: null, expectedCurrentHash: null });
+  const installHash = 'b'.repeat(64);
+  assert.deepEqual(parseInstallerArgs([]), { migrate: false, extensionId: null, expectedCurrentHash: null, reviewedInstallHash: null });
   assert.throws(() => parseInstallerArgs(['--migrate']), /extension-id/i);
   assert.throws(() => parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID]), /expected-current-hash/i);
+  assert.throws(() => parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash]), /reviewed-install-hash/i);
+  assert.throws(() => parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash, '--reviewed-install-hash', installHash]), /duplicate/i);
   assert.throws(() => parseInstallerArgs(['--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash]), /migrate/i);
   assert.throws(() => parseInstallerArgs(['--install', '--extension-id', EXTENSION_ID]), /unknown/i);
-  assert.deepEqual(parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash]), { migrate: true, extensionId: EXTENSION_ID, expectedCurrentHash: currentHash });
+  assert.deepEqual(parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash]), { migrate: true, extensionId: EXTENSION_ID, expectedCurrentHash: currentHash, reviewedInstallHash: installHash });
+});
+
+test('inspects a concrete non-symlink Codex executable and binds its bytes', async t => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sidecar-codex-path-'))); t.after(() => import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })));
+  const executable = path.join(root, 'codex-real');
+  await writeFile(executable, '#!/bin/sh\n', { mode: 0o700 });
+  const identity = await inspectExecutable(executable);
+  assert.deepEqual(identity, { path: executable, bytes: 10, sha256: sha256Bytes('#!/bin/sh\n'), mode: 0o700 });
+  const link = path.join(root, 'codex'); await symlink(executable, link);
+  await assert.rejects(() => inspectExecutable(link), /symlink|concrete/i);
 });
 
 test('dry-run plan targets Chrome Dev and a trusted installed bootstrap with one exact unchanged origin', () => {
   const launcherPath = '/Users/example/Library/Application Support/Resonant Sidecar/native-host';
   const manifestPath = '/Users/example/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json';
   const current = currentIdentity(launcherPath, manifestPath);
-  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: '/Users/example', nodePath: '/opt/node/bin/node', codexPath: '/Users/example/.local/bin/codex', projectRoot: '/Users/example/resonant-sidecar' });
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: '/Users/example', nodePath: '/opt/node/bin/node', codexPath: '/Users/example/.local/bin/codex', codexExecutable: codexIdentity('/Users/example/.local/bin/codex'), projectRoot: '/Users/example/resonant-sidecar' });
   assert.equal(plan.mode, 'dry-run');
   assert.equal(plan.browser, 'Google Chrome Dev');
   assert.equal(plan.paths.manifest, '/Users/example/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json');
   assert.equal(plan.paths.stableExtension, '/Users/example/Library/Application Support/Resonant Sidecar/extension');
   assert.equal(plan.paths.trustedBootstrap, '/Users/example/Library/Application Support/Resonant Sidecar/trusted-bootstrap');
+  assert.equal(plan.paths.reviewHome, '/Users/example/Library/Application Support/Resonant Sidecar/codex-review-home');
+  assert.deepEqual(plan.codexExecutable, { path: '/Users/example/.local/bin/codex', bytes: 7, sha256: '9'.repeat(64), mode: 0o700 });
+  assert.deepEqual(plan.reviewHome, { destination: plan.paths.reviewHome, mode: 0o700 });
   assert.equal(plan.paths.activeBundle, `/Users/example/resonant-sidecar/runtime/versions/${plan.bundle.digest}/bundle`);
   assert.deepEqual(plan.runtimeDirectory, { destination: '/Users/example/resonant-sidecar/runtime', mode: 0o700 });
   assert.equal(plan.bundle.manifestArtifact.destination, `${plan.paths.activeVersion}/manifest.json`);
@@ -93,13 +111,46 @@ test('dry-run plan targets Chrome Dev and a trusted installed bootstrap with one
   });
   assert.equal(plan.manifest.contents.path, plan.paths.launcher);
   assert.match(plan.launcher.contents, /trusted-bootstrap\/runtime-entry\.js/);
+  assert.match(plan.trustedBootstrap.files.find(file => file.path === 'runtime-entry.js').sha256, /^[a-f0-9]{64}$/);
+  assert.match(plan.trustedBootstrap.files.find(file => file.path === 'runtime-entry.js') ? plan.launcher.contents : '', /runtime-entry/);
   assert.doesNotMatch(plan.launcher.contents, /resonant-sidecar\/native-host\/host\.js/);
   assert.doesNotMatch(plan.launcher.contents, /localhost|127\.0\.0\.1|remote-debugging|WebSocket/i);
   assert.equal(plan.before.currentHash, current.currentHash);
   assert.equal(plan.receipts.before.eventType, 'migration-before');
   assert.equal(plan.receipts.migration.eventType, 'migration-prepared');
   assert.equal(plan.receipts.after.eventType, 'migration-files-prepared');
+  assert.deepEqual(plan.receipts.before.registration.launcher, plan.before.launcher);
+  assert.deepEqual(plan.receipts.before.registration.manifest, plan.before.manifest);
+  assert.ok(plan.receipts.before.inventory.some(file => file.destination === plan.runtimeEntry.destination && file.mode === 0o400));
+  assert.ok(plan.receipts.before.inventory.some(file => file.destination === plan.activePin.destination && file.mode === 0o600));
   verifyInstallPlan(plan);
+});
+
+test('generated trusted entry adapts the verified active bundleRoot for deterministic review', () => {
+  const launcherPath = '/Users/example/Library/Application Support/Resonant Sidecar/native-host';
+  const manifestPath = '/Users/example/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json';
+  const current = currentIdentity(launcherPath, manifestPath);
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: '/Users/example', nodePath: '/opt/node/bin/node', codexPath: '/opt/codex', codexExecutable: { path: '/opt/codex', bytes: 5, sha256: '8'.repeat(64), mode: 0o700 }, projectRoot: '/Users/example/repo' });
+  const entry = plan.trustedBootstrap.files.find(file => file.path === 'runtime-entry.js');
+  assert.equal(entry.sha256, plan.trustedBootstrap.entryDigest);
+  assert.match(plan.runtimeEntry.contents, /active:\s*\{\s*\.\.\.input\.active,\s*root:\s*input\.active\.bundleRoot\s*\}/);
+});
+
+test('migration requires the exact reviewed install hash before its first write', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sidecar-approval-')));
+  const homeDir = path.join(root, 'home'); const projectRoot = path.join(root, 'project');
+  await mkdir(path.join(projectRoot, 'runtime'), { recursive: true, mode: 0o700 });
+  const launcher = path.join(homeDir, 'Library/Application Support/Resonant Sidecar/native-host');
+  const manifest = path.join(homeDir, 'Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json');
+  await mkdir(path.dirname(launcher), { recursive: true }); await mkdir(path.dirname(manifest), { recursive: true });
+  await writeFile(launcher, 'old', { mode: 0o700 }); await writeFile(manifest, 'manifest', { mode: 0o600 });
+  const current = await inspectCurrentInstallation({ launcher, manifest });
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir, projectRoot, nodePath: process.execPath, codexPath: process.execPath, codexExecutable: { path: process.execPath, bytes: (await stat(process.execPath)).size, sha256: sha256Bytes(await readFile(process.execPath)), mode: (await stat(process.execPath)).mode & 0o777 } });
+  await assert.rejects(() => migrateInstallation(plan), /reviewed install hash/i);
+  await assert.rejects(() => migrateInstallation(plan, { reviewedInstallHash: 'f'.repeat(64) }), /reviewed install hash/i);
+  const changed = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir, projectRoot, nodePath: process.execPath, codexPath: process.execPath, codexExecutable: { ...plan.codexExecutable, sha256: 'e'.repeat(64) } });
+  await assert.rejects(() => migrateInstallation(plan, { reviewedInstallHash: plan.installHash, regeneratePlan: async () => changed }), /regenerated plan/i);
+  await assert.rejects(() => lstat(plan.paths.journal), /ENOENT/);
 });
 
 test('planning and current-install inspection are read-only', async () => {
@@ -111,7 +162,7 @@ test('planning and current-install inspection are read-only', async () => {
   await writeFile(paths.manifest, '{"name":"old"}\n', { mode: 0o600 });
   const before = await Promise.all([stat(paths.launcher), stat(paths.manifest)]);
   const current = await inspectCurrentInstallation(paths);
-  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: root, projectRoot: path.join(root, 'repo'), nodePath: '/opt/node/bin/node', codexPath: '/opt/codex' });
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: root, projectRoot: path.join(root, 'repo'), nodePath: '/opt/node/bin/node', codexPath: '/opt/codex', codexExecutable: codexIdentity('/opt/codex') });
   verifyInstallPlan(plan);
   const after = await Promise.all([stat(paths.launcher), stat(paths.manifest)]);
   assert.deepEqual(after.map(info => [info.ino, info.size, info.mtimeMs]), before.map(info => [info.ino, info.size, info.mtimeMs]));
@@ -124,7 +175,7 @@ test('reviewed plan file can be verified without executing or changing it', asyn
   const launcherPath = path.join(root, 'Library', 'Application Support', 'Resonant Sidecar', 'native-host');
   const manifestPath = path.join(root, 'Library', 'Application Support', 'Google', 'Chrome Dev', 'NativeMessagingHosts', 'com.resonantmirror.sidecar.json');
   const current = currentIdentity(launcherPath, manifestPath);
-  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: root, projectRoot: path.join(root, 'repo'), nodePath: '/opt/node/bin/node', codexPath: '/opt/codex' });
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: root, projectRoot: path.join(root, 'repo'), nodePath: '/opt/node/bin/node', codexPath: '/opt/codex', codexExecutable: codexIdentity('/opt/codex') });
   const planPath = path.join(root, 'reviewed-plan.json');
   await writeFile(planPath, JSON.stringify(plan));
   const before = await stat(planPath);
@@ -138,7 +189,7 @@ test('plan verifier rejects unproved registration and redirected artifact destin
   const launcherPath = '/Users/example/Library/Application Support/Resonant Sidecar/native-host';
   const manifestPath = '/Users/example/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json';
   const current = currentIdentity(launcherPath, manifestPath);
-  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: '/Users/example', projectRoot: '/Users/example/repo', nodePath: '/opt/node/bin/node', codexPath: '/opt/codex' });
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir: '/Users/example', projectRoot: '/Users/example/repo', nodePath: '/opt/node/bin/node', codexPath: '/opt/codex', codexExecutable: codexIdentity('/opt/codex') });
   const redirected = structuredClone(plan);
   redirected.stableExtension.files[0].destination = '/tmp/redirected-manifest.json';
   delete redirected.installHash;
@@ -149,6 +200,24 @@ test('plan verifier rejects unproved registration and redirected artifact destin
   delete claimed.installHash;
   claimed.installHash = sha256Json(claimed);
   assert.throws(() => verifyInstallPlan(claimed), /identity proof/i);
+  const brokenChain = structuredClone(plan);
+  brokenChain.receipts.after.previousReceiptHash = 'f'.repeat(64);
+  assert.throws(() => verifyInstallPlan(brokenChain), /receipt chain/i);
+});
+
+test('Codex executable tamper is detected before any migration write', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sidecar-codex-tamper-')));
+  const homeDir = path.join(root, 'home'); const projectRoot = path.join(root, 'project'); await mkdir(path.join(projectRoot, 'runtime'), { recursive: true, mode: 0o700 });
+  const launcher = path.join(homeDir, 'Library/Application Support/Resonant Sidecar/native-host');
+  const manifest = path.join(homeDir, 'Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json');
+  const codexPath = path.join(root, 'codex');
+  await mkdir(path.dirname(launcher), { recursive: true }); await mkdir(path.dirname(manifest), { recursive: true });
+  await writeFile(launcher, 'old', { mode: 0o700 }); await writeFile(manifest, 'manifest', { mode: 0o600 }); await writeFile(codexPath, '#!/bin/sh\n', { mode: 0o700 });
+  const current = await inspectCurrentInstallation({ launcher, manifest }); const codexExecutable = await inspectExecutable(codexPath);
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir, projectRoot, nodePath: process.execPath, codexPath, codexExecutable });
+  await writeFile(codexPath, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+  await assert.rejects(() => migrateInstallation(plan, { reviewedInstallHash: plan.installHash, regeneratePlan: async () => plan }), /executable changed/i);
+  await assert.rejects(() => lstat(plan.paths.journal), /ENOENT/);
 });
 
 test('explicit migration installs exact pinned bytes and preserves the prior V1 registration', async t => {
@@ -167,8 +236,10 @@ test('explicit migration installs exact pinned bytes and preserves the prior V1 
   await writeFile(manifestPath, oldManifest, { mode: 0o600 });
   const current = await inspectCurrentInstallation({ launcher: launcherPath, manifest: manifestPath });
   const inspection = sourceInspection();
-  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: inspection, homeDir, projectRoot, nodePath: process.execPath, codexPath: '/opt/codex' });
-  const result = await migrateInstallation(plan);
+  const concreteCodex = await realpath(process.execPath); const executableIdentity = await inspectExecutable(concreteCodex);
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: inspection, homeDir, projectRoot, nodePath: process.execPath, codexPath: concreteCodex, codexExecutable: executableIdentity });
+  const durabilityCalls = [];
+  const result = await migrateInstallation(plan, { reviewedInstallHash: plan.installHash, regeneratePlan: async () => plan, durability: { syncDirectory: async directory => durabilityCalls.push(directory) } });
   assert.equal(result.mode, 'prepared');
   assert.equal(result.installHash, plan.installHash);
   assert.equal(result.registration, 'unchanged-pending-stable-id-proof');
@@ -177,6 +248,8 @@ test('explicit migration installs exact pinned bytes and preserves the prior V1 
   assert.equal((await stat(plan.paths.launcher)).mode & 0o777, 0o700);
   assert.equal((await stat(plan.paths.manifest)).mode & 0o777, 0o600);
   assert.equal((await stat(path.join(projectRoot, 'runtime'))).mode & 0o777, 0o700);
+  assert.equal((await stat(plan.paths.reviewHome)).mode & 0o777, 0o700);
+  assert.ok(durabilityCalls.includes(path.dirname(plan.paths.activeVersion)));
   assert.equal(await readFile(path.join(plan.paths.recovery, 'native-host'), 'utf8'), oldLauncher);
   assert.equal(await readFile(path.join(plan.paths.recovery, 'native-host-manifest.json'), 'utf8'), oldManifest);
   assert.equal((await stat(path.join(plan.paths.recovery, 'native-host'))).mode & 0o777, 0o400);
@@ -184,6 +257,19 @@ test('explicit migration installs exact pinned bytes and preserves the prior V1 
   for (const file of inspection.bundle.files) assert.deepEqual(await readFile(path.join(plan.paths.activeBundle, file.relativePath)), file.bytes);
   assert.deepEqual(await readFile(path.join(plan.paths.stableExtension, 'manifest.json')), inspection.bundle.files.find(file => file.relativePath === 'extension/manifest.json').bytes);
   await execFileAsync(process.execPath, ['--check', path.join(plan.paths.trustedBootstrap, 'runtime-entry.js')]);
+  const active = await new VersionStore({ projectRoot }).resolveActiveHost();
+  assert.equal(active.digest, plan.bundle.digest);
+  assert.equal(active.bundleRoot, plan.paths.activeBundle);
+  const receipts = await Promise.all(['before', 'migration', 'after'].map(name => readFile(path.join(plan.paths.migrationReceipts, `${name}.json`), 'utf8').then(JSON.parse)));
+  assert.equal(receipts[0].installHash, plan.installHash);
+  assert.equal(receipts[0].previousReceiptHash, null);
+  assert.equal(receipts[1].previousReceiptHash, receipts[0].receiptHash);
+  assert.equal(receipts[2].previousReceiptHash, receipts[1].receiptHash);
+  assert.equal(receipts[2].stableExtensionDigest, plan.stableExtension.digest);
+  assert.equal(receipts[2].runtimeEntryDigest, plan.runtimeEntry.sha256);
+  assert.equal(receipts[2].inventoryHash, plan.inventoryHash);
+  assert.deepEqual(receipts[2].inventory, receipts[0].inventory);
+  assert.ok(receipts[2].inventory.every(file => path.isAbsolute(file.destination) && Number.isInteger(file.mode)));
   t.after(async () => { await chmod(path.join(plan.paths.recovery, 'native-host'), 0o600).catch(() => {}); });
 });
 
@@ -202,9 +288,10 @@ test('failed preparation records visible journal state while leaving V1 registra
   await writeFile(manifestPath, oldManifest, { mode: 0o600 });
   const current = await inspectCurrentInstallation({ launcher: launcherPath, manifest: manifestPath });
   const inspection = sourceInspection();
-  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: inspection, homeDir, projectRoot, nodePath: process.execPath, codexPath: '/opt/codex' });
+  const concreteCodex = await realpath(process.execPath); const executableIdentity = await inspectExecutable(concreteCodex);
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: inspection, homeDir, projectRoot, nodePath: process.execPath, codexPath: concreteCodex, codexExecutable: executableIdentity });
   inspection.trustedBootstrap.files[0].bytes[0] ^= 0xff;
-  await assert.rejects(() => migrateInstallation(plan), /pinned source unavailable/i);
+  await assert.rejects(() => migrateInstallation(plan, { reviewedInstallHash: plan.installHash, regeneratePlan: async () => plan }), /pinned source unavailable/i);
   assert.equal(await readFile(launcherPath, 'utf8'), oldLauncher);
   assert.equal(await readFile(manifestPath, 'utf8'), oldManifest);
   const journal = JSON.parse(await readFile(plan.paths.journal, 'utf8'));
@@ -226,17 +313,18 @@ test('migration fails closed on stale hash and symlink target without replacing 
   await writeFile(launcherPath, 'old', { mode: 0o700 });
   await writeFile(manifestPath, 'old-manifest', { mode: 0o600 });
   const current = await inspectCurrentInstallation({ launcher: launcherPath, manifest: manifestPath });
-  const args = { extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir, projectRoot, nodePath: process.execPath, codexPath: '/opt/codex' };
+  const concreteCodex = await realpath(process.execPath); const executableIdentity = await inspectExecutable(concreteCodex);
+  const args = { extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: sourceInspection(), homeDir, projectRoot, nodePath: process.execPath, codexPath: concreteCodex, codexExecutable: executableIdentity };
   const stale = buildInstallPlan(args);
   await writeFile(launcherPath, 'changed', { mode: 0o700 });
-  await assert.rejects(() => migrateInstallation(stale), /current installation changed/i);
+  await assert.rejects(() => migrateInstallation(stale, { reviewedInstallHash: stale.installHash, regeneratePlan: async () => stale }), /current installation changed/i);
   assert.equal(await readFile(manifestPath, 'utf8'), 'old-manifest');
   await writeFile(launcherPath, 'old', { mode: 0o700 });
   const freshCurrent = await inspectCurrentInstallation({ launcher: launcherPath, manifest: manifestPath });
   const symlinkPlan = buildInstallPlan({ ...args, expectedCurrentHash: freshCurrent.currentHash, currentInstallation: freshCurrent });
   await mkdir(path.dirname(symlinkPlan.paths.stableExtension), { recursive: true });
   await import('node:fs/promises').then(fs => fs.symlink('/tmp', symlinkPlan.paths.stableExtension));
-  await assert.rejects(() => migrateInstallation(symlinkPlan), /symbolic link|custody/i);
+  await assert.rejects(() => migrateInstallation(symlinkPlan, { reviewedInstallHash: symlinkPlan.installHash, regeneratePlan: async () => symlinkPlan }), /symbolic link|custody/i);
   assert.equal(await readFile(launcherPath, 'utf8'), 'old');
   assert.equal(await readFile(manifestPath, 'utf8'), 'old-manifest');
 });
