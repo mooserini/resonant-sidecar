@@ -53,12 +53,21 @@ function conversationEvent(message) {
   return message;
 }
 
-export function startNativeProxy({ nodePath, codexPath, active, workspace, userHome, codexHome, onMessage, onFailure }) {
+export function startNativeProxy({ nodePath, codexPath, grokPath = null, conversationAgent = 'codex', active, workspace, userHome, codexHome, onMessage, onFailure }) {
   executable(nodePath); executable(codexPath);
+  if (conversationAgent === 'grok') executable(grokPath);
   for (const p of [active.hostPath, active.bundleRoot, workspace, userHome, codexHome].filter(p => p !== undefined)) {
     if (!path.isAbsolute(p) || path.normalize(p) !== p || realpathSync(p) !== p) throw new Error('Expected concrete runtime path');
   }
-  const env = { PATH: '/usr/bin:/bin', LANG: 'C', RESONANT_CODEX_COMMAND: codexPath, RESONANT_CODEX_ARGS: '["app-server"]', RESONANT_WORKSPACE: workspace };
+  const grok = conversationAgent === 'grok';
+  const env = {
+    PATH: '/usr/bin:/bin',
+    LANG: 'C',
+    RESONANT_AGENT: grok ? 'grok' : 'codex',
+    RESONANT_CODEX_COMMAND: grok ? grokPath : codexPath,
+    RESONANT_CODEX_ARGS: grok ? '["agent","--no-leader","stdio"]' : '["app-server"]',
+    RESONANT_WORKSPACE: workspace,
+  };
   if (userHome !== undefined) env.HOME = userHome;
   if (codexHome !== undefined) env.CODEX_HOME = codexHome;
   const child = spawn(nodePath, [active.hostPath], { cwd: active.bundleRoot, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false, detached: true });

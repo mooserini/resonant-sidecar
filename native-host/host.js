@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { AppServerClient } from './app-server-client.js';
+import { GrokAgentClient } from './grok-agent-client.js';
 import { NativeMessageDecoder, encodeNativeMessage } from './native-framing.js';
 import { parseBrowserMessage, isLifecycleMessage } from './sidecar-protocol.js';
 
@@ -25,11 +26,13 @@ function safeError(error) {
 
 let appServer;
 try {
-  appServer = new AppServerClient({
-    command: process.env.RESONANT_CODEX_COMMAND || 'codex',
-    args: parseArgs(),
-    cwd: process.env.RESONANT_WORKSPACE || process.cwd(),
-  });
+  const command = process.env.RESONANT_CODEX_COMMAND || 'codex';
+  const args = parseArgs();
+  const cwd = process.env.RESONANT_WORKSPACE || process.cwd();
+  const grok = process.env.RESONANT_AGENT === 'grok' || args.includes('stdio');
+  appServer = grok
+    ? new GrokAgentClient({ command, args, cwd })
+    : new AppServerClient({ command, args, cwd });
 } catch (error) {
   console.error(safeError(error));
   process.exit(1);
