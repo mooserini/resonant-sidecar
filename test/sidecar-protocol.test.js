@@ -58,6 +58,7 @@ test('accepts a nullable thread id when opening a session', () => {
   assert.deepEqual(parseBrowserMessage({ type: 'session.open', threadId: null }), {
     type: 'session.open',
     threadId: null,
+    agent: null,
   });
 });
 
@@ -65,6 +66,15 @@ test('accepts a specific thread id when reopening a session', () => {
   assert.deepEqual(parseBrowserMessage({ type: 'session.open', threadId: 'thread-123' }), {
     type: 'session.open',
     threadId: 'thread-123',
+    agent: null,
+  });
+});
+
+test('accepts an ACP agent name on session.open', () => {
+  assert.deepEqual(parseBrowserMessage({ type: 'session.open', threadId: null, agent: 'hermes' }), {
+    type: 'session.open',
+    threadId: null,
+    agent: 'hermes',
   });
 });
 

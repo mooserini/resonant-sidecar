@@ -114,7 +114,7 @@ if (mode === 'unit') {
 } else if (mode === 'protocol') {
   const { parseBrowserMessage } = await load('native-host/sidecar-protocol.js');
   assert.deepEqual(plain(parseBrowserMessage({ type: 'turn.start', text: '/literal λ' })), { type: 'turn.start', text: '/literal λ' });
-  assert.deepEqual(plain(parseBrowserMessage({ type: 'session.open', threadId: 'thread-existing' })), { type: 'session.open', threadId: 'thread-existing' });
+  assert.deepEqual(plain(parseBrowserMessage({ type: 'session.open', threadId: 'thread-existing' })), { type: 'session.open', threadId: 'thread-existing', agent: null });
   for (const message of [{ type: 'run.command' }, { type: 'turn.interrupt', command: 'no' }, { type: 'turn.start', text: ' ' }, { type: 'turn.start', text: 'x'.repeat(32769) }]) assert.throws(() => parseBrowserMessage(message));
 } else if (mode === 'continuity') {
   const value = await client();
@@ -133,10 +133,13 @@ if (mode === 'unit') {
       assert.equal(name, 'com.resonantmirror.sidecar');
       return { postMessage: message => sent.push(plain(message)), onMessage: { addListener() {} }, onDisconnect: { addListener() {} } };
     },
-    storage: { get: async key => { assert.equal(key, 'codexThreadId'); return { codexThreadId: 'thread-existing' }; } },
+    storage: { get: async query => {
+      assert.deepEqual(query, ['threadId:grok', 'resonantAgent']);
+      return { 'threadId:grok': 'thread-existing' };
+    } },
   });
   await session.connect();
-  assert.deepEqual(sent, [{ type: 'session.open', threadId: 'thread-existing' }]);
+  assert.deepEqual(sent, [{ type: 'session.open', threadId: 'thread-existing', agent: 'grok' }]);
 } else if (mode === 'interruption') {
   const value = await client();
   try {

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { AppServerClient } from './app-server-client.js';
-import { GrokAgentClient } from './grok-agent-client.js';
+import { AcpAgentClient } from './grok-agent-client.js';
+import { resolveAgent } from './agents.js';
 import { NativeMessageDecoder, encodeNativeMessage } from './native-framing.js';
 import { parseBrowserMessage, isLifecycleMessage } from './sidecar-protocol.js';
 
@@ -39,37 +40,57 @@ function safeError(error) {
   return message.slice(0, 1024);
 }
 
-let appServer;
+let appServer = null;
 let grokBackend = false;
-try {
-  const command = process.env.RESONANT_CODEX_COMMAND || 'codex';
-  const args = parseArgs();
-  const cwd = process.env.RESONANT_WORKSPACE || process.cwd();
-  grokBackend = process.env.RESONANT_AGENT === 'grok' || args.includes('stdio');
-  appServer = grokBackend
-    ? new GrokAgentClient({ command, args, cwd })
-    : new AppServerClient({ command, args, cwd });
-} catch (error) {
-  console.error(safeError(error));
-  process.exit(1);
+let currentAgent = null;
+const cwd = process.env.RESONANT_WORKSPACE || process.cwd();
+
+function bindClient(client) {
+  client.on('event', event => {
+    if (event.type === 'diagnostic') {
+      process.stderr.write(event.text);
+      return;
+    }
+    if (event.type === 'process.error') {
+      send({ type: 'error', message: 'Native runtime unavailable' });
+      return;
+    }
+    if (event.type === 'error' || event.type === 'protocol.error') {
+      send({ type: event.type, message: 'Native runtime unavailable' });
+      return;
+    }
+    if (!BROWSER_EVENTS.has(event.type)) return;
+    send(event);
+  });
 }
 
-appServer.on('event', event => {
-  if (event.type === 'diagnostic') {
-    process.stderr.write(event.text);
-    return;
+function createBackend(agent) {
+  if (agent === 'hermes' || agent === 'grok') {
+    const spec = resolveAgent(agent);
+    return { acp: true, client: new AcpAgentClient({ command: spec.command, args: spec.args, cwd }) };
   }
-  if (event.type === 'process.error') {
-    send({ type: 'error', message: 'Native runtime unavailable' });
-    return;
+  if (agent === 'codex') {
+    const spec = resolveAgent('codex');
+    if (spec.kind === 'acp') return { acp: true, client: new AcpAgentClient({ command: spec.command, args: spec.args, cwd }) };
+    return { acp: false, client: new AppServerClient({ command: spec.command, args: spec.args, cwd }) };
   }
-  if (event.type === 'error' || event.type === 'protocol.error') {
-    send({ type: event.type, message: 'Native runtime unavailable' });
-    return;
-  }
-  if (!BROWSER_EVENTS.has(event.type)) return;
-  send(event);
-});
+  const command = process.env.RESONANT_CODEX_COMMAND || 'codex';
+  const args = parseArgs();
+  const acp = process.env.RESONANT_AGENT === 'grok' || args.includes('stdio');
+  return acp
+    ? { acp: true, client: new AcpAgentClient({ command, args, cwd }) }
+    : { acp: false, client: new AppServerClient({ command, args, cwd }) };
+}
+
+function ensureBackend(agent) {
+  if (appServer && currentAgent === (agent ?? currentAgent)) return;
+  appServer?.close();
+  const created = createBackend(agent);
+  grokBackend = created.acp;
+  appServer = created.client;
+  currentAgent = agent ?? currentAgent;
+  bindClient(appServer);
+}
 
 async function handleBrowserMessage(value) {
   // Only the stable trusted bootstrap may route review/refresh authority.
@@ -80,6 +101,7 @@ async function handleBrowserMessage(value) {
   const message = parseBrowserMessage(value);
 
   if (message.type === 'session.open') {
+    ensureBackend(message.agent);
     await appServer.start();
     await appServer.openSession(message.threadId);
     return;
@@ -108,8 +130,8 @@ process.stdin.on('data', chunk => {
   }
 });
 
-process.stdin.on('end', () => appServer.close());
+process.stdin.on('end', () => appServer?.close());
 process.on('SIGTERM', () => {
-  appServer.close();
+  appServer?.close();
   process.exit(0);
 });

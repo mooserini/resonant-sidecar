@@ -43,7 +43,15 @@
       <p id="announcement" class="sr-only" aria-live="polite"></p>
       <p id="error-message" class="error" role="alert" hidden></p>
       <form id="turn-form">
-        <label for="turn-text">Message to Codex</label>
+        <div class="agent-row">
+          <label for="agent">Agent</label>
+          <select id="agent" name="agent">
+            <option value="hermes">Hermes</option>
+            <option value="grok" selected>Grok</option>
+            <option value="codex">Codex</option>
+          </select>
+        </div>
+        <label for="turn-text">Message</label>
         <textarea id="turn-text" name="message" rows="4" maxlength="32768" required></textarea>
         <div class="actions">
           <button id="send-button" type="submit">Send turn</button>

@@ -40,11 +40,12 @@ class FakePort {
 }
 
 function createStorage(threadId = null) {
-  const values = threadId ? { codexThreadId: threadId } : {};
+  const values = threadId ? { 'threadId:grok': threadId } : {};
   return {
     values,
-    async get(key) {
-      return { [key]: values[key] };
+    async get(query) {
+      if (Array.isArray(query)) return Object.fromEntries(query.map(key => [key, values[key]]));
+      return { [query]: values[query] };
     },
     async set(update) {
       Object.assign(values, update);
@@ -216,7 +217,7 @@ for (const origin of ['local', 'remote', 'reentrant-local']) test(`${origin} dis
   if (origin === 'remote') ports[0].onDisconnect.emit(); else session.disconnect();
   assert.equal(closed, 1); assert.equal(session.port, null); assert.equal(session.canNavigateReview, false);
   session.disconnect(); assert.equal(closed, 1);
-  await session.connect(); assert.equal(connections, 2); assert.deepEqual(ports[1].posted, [{ type: 'session.open', threadId: null }]);
+  await session.connect(); assert.equal(connections, 2); assert.deepEqual(ports[1].posted, [{ type: 'session.open', threadId: null, agent: 'grok' }]);
   for (const message of [eligible, { type: 'session.ready', threadId: 'stale' }, { type: 'turn.started' }]) ports[0].onMessage.emit(message);
   ports[0].onDisconnect.emit(); assert.equal(session.port, ports[1]); assert.equal(session.turnActive, false); assert.equal(session.reviewState, 'idle'); assert.equal(closed, 1);
   assert.equal(ports[0].disconnectCalls, origin === 'remote' ? 0 : 1);
@@ -273,7 +274,7 @@ test('opens the stored Codex thread over the named native host', async () => {
 
   await session.connect();
 
-  assert.deepEqual(port.posted, [{ type: 'session.open', threadId: 'thread-existing' }]);
+  assert.deepEqual(port.posted, [{ type: 'session.open', threadId: 'thread-existing', agent: 'grok' }]);
 });
 
 test('stores only the ready thread id and forwards exact turn text', async () => {
@@ -291,8 +292,8 @@ test('stores only the ready thread id and forwards exact turn text', async () =>
 
   session.sendTurn('/literal λ text');
 
-  assert.equal(storage.values.codexThreadId, 'thread-new');
-  assert.deepEqual(Object.keys(storage.values), ['codexThreadId']);
+  assert.equal(storage.values['threadId:grok'], 'thread-new');
+  assert.deepEqual(Object.keys(storage.values), ['threadId:grok']);
   assert.deepEqual(port.posted.at(-1), { type: 'turn.start', text: '/literal λ text' });
   assert.ok(events.some(event => event.type === 'session.ready'));
 });
@@ -445,7 +446,7 @@ test('reconnected Port rejects a retained old ready callback and late model comp
   oldPort.onMessage.emit(ready); await until(() => session.chromeReviewState?.state === 'ready'); const work = session.runChromeReview(); await until(() => model.calls.includes('prompt'));
   session.disconnect(); await work; await session.connect(); oldPort.onMessage.emit(ready); resolveModel(RAW);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(freshPort.posted, [{ type: 'session.open', threadId: null }]); assert.equal(model.calls.filter(call => call === 'availability').length, 1);
+  assert.deepEqual(freshPort.posted, [{ type: 'session.open', threadId: null, agent: 'grok' }]); assert.equal(model.calls.filter(call => call === 'availability').length, 1);
   assert.equal(await session.runChromeReview(), false);
 });
 

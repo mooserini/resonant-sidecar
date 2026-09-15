@@ -59,7 +59,8 @@ export function parseBrowserMessage(value) {
   if (isLifecycleMessage(value)) return exactLifecycle(value, COMMANDS);
 
   if (value.type === 'session.open') {
-    assertOnlyKeys(value, ['type', 'threadId']);
+    const keys = Object.hasOwn(value, 'agent') ? ['type', 'threadId', 'agent'] : ['type', 'threadId'];
+    assertOnlyKeys(value, keys);
     if (value.threadId !== null && typeof value.threadId !== 'string') {
       throw new TypeError('session.open threadId must be a string or null');
     }
@@ -68,7 +69,10 @@ export function parseBrowserMessage(value) {
         throw new RangeError('session.open threadId must contain 1 to 256 characters');
       }
     }
-    return { type: value.type, threadId: value.threadId };
+    if (Object.hasOwn(value, 'agent') && value.agent !== 'hermes' && value.agent !== 'grok' && value.agent !== 'codex') {
+      throw new TypeError('session.open agent must be hermes, grok, or codex');
+    }
+    return { type: value.type, threadId: value.threadId, agent: value.agent ?? null };
   }
 
   if (value.type === 'turn.start') {

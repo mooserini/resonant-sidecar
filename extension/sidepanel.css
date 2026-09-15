@@ -110,6 +110,25 @@ label {
   font-size: 0.78rem;
 }
 
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.55rem;
+}
+
+.agent-row label { margin: 0; }
+
+.agent-row select {
+  min-width: 7rem;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid #536770;
+  border-radius: 2px;
+  background: #07090a;
+  color: inherit;
+  font: inherit;
+}
+
 textarea {
   width: 100%;
   resize: vertical;

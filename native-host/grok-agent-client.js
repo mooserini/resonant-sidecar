@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import os from 'node:os';
+import path from 'node:path';
 import readline from 'node:readline';
 
 const ZERO_TOOL_INSTRUCTIONS = [
@@ -56,9 +58,13 @@ export class GrokAgentClient extends EventEmitter {
     if (this.#process) return;
     if (this.#closed) throw new Error('App-server client is closed');
 
+    const localBin = path.join(os.homedir(), '.local', 'bin');
     this.#process = spawn(this.#command, this.#args, {
       cwd: this.#cwd,
-      env: process.env,
+      env: {
+        ...process.env,
+        PATH: `${localBin}${path.delimiter}${process.env.PATH || '/usr/bin:/bin'}`,
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.#process.once('error', error => this.#failAll(error));
@@ -259,3 +265,5 @@ export class GrokAgentClient extends EventEmitter {
     this.emit('event', { type: 'process.error', message: normalized.message });
   }
 }
+
+export { GrokAgentClient as AcpAgentClient };

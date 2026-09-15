@@ -2,7 +2,11 @@ import { createChromeReviewAdapter } from './chrome-review-adapter.js';
 import { snapshotChromeReviewValue } from './chrome-review-contract.js';
 
 const HOST_NAME = 'com.resonantmirror.sidecar';
-const THREAD_STORAGE_KEY = 'codexThreadId';
+const AGENT_STORAGE_KEY = 'resonantAgent';
+const AGENTS = Object.freeze(['hermes', 'grok', 'codex']);
+function threadStorageKey(agent) {
+  return `threadId:${agent}`;
+}
 
 const lifecycleTypes = new Set(['update.available', 'review.started', 'review.eligible', 'review.failed', 'activation.started', 'activation.completed', 'activation.rolledBack']);
 function lifecycleEvent(value) {
@@ -37,6 +41,7 @@ export class SidecarSession {
     this.onEvent = onEvent;
     this.port = null;
     this.turnActive = false;
+    this.agent = 'grok';
     this.pending = Promise.resolve();
   }
 
@@ -49,7 +54,8 @@ export class SidecarSession {
   }
 
   async #connect(generation) {
-    const stored = await this.storage.get(THREAD_STORAGE_KEY);
+    const threadKey = threadStorageKey(this.agent);
+    const stored = await this.storage.get([threadKey, AGENT_STORAGE_KEY]);
     if (generation !== this.#connectionGeneration) return;
     this.port = this.connectNative(HOST_NAME);
     const port = this.port;
@@ -57,10 +63,17 @@ export class SidecarSession {
     port.onDisconnect.addListener(() => this.#closeConnection(port, 'connection-loss'));
     this.port.postMessage({
       type: 'session.open',
-      threadId: typeof stored[THREAD_STORAGE_KEY] === 'string'
-        ? stored[THREAD_STORAGE_KEY]
-        : null,
+      threadId: typeof stored[threadKey] === 'string' ? stored[threadKey] : null,
+      agent: this.agent,
     });
+  }
+
+  async setAgent(agent) {
+    if (!AGENTS.includes(agent) || agent === this.agent) return;
+    this.agent = agent;
+    await this.storage.set({ [AGENT_STORAGE_KEY]: agent });
+    this.disconnect();
+    await this.connect();
   }
 
   sendTurn(text) {
@@ -232,7 +245,7 @@ export class SidecarSession {
     if (message.type === 'session.ready' && typeof message.threadId === 'string') {
       this.#invalidateChrome('provenance-drift');
       this.turnActive = false;
-      this.pending = this.storage.set({ [THREAD_STORAGE_KEY]: message.threadId });
+      this.pending = this.storage.set({ [threadStorageKey(this.agent)]: message.threadId });
     }
     if (message.type === 'turn.started') this.turnActive = true;
     if (message.type === 'turn.completed') {

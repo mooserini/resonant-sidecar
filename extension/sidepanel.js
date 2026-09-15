@@ -2,6 +2,7 @@ import { SidecarSession } from './sidepanel-controller.js';
 
 const transcript = document.querySelector('#transcript');
 const form = document.querySelector('#turn-form');
+const agentSelect = document.querySelector('#agent');
 const text = document.querySelector('#turn-text');
 const sendButton = document.querySelector('#send-button');
 const stopButton = document.querySelector('#stop-button');
@@ -63,7 +64,7 @@ function handleEvent(event) {
   if (event.type === 'session.ready') {
     setBusy(false);
     setStatus('Ready', 'ready');
-    announcement.textContent = 'Local Codex session ready.';
+    announcement.textContent = 'Local session ready.';
     text.focus();
     return;
   }
@@ -84,7 +85,7 @@ function handleEvent(event) {
     assistantBody = null;
     announcement.textContent = event.status === 'interrupted'
       ? 'Turn stopped.'
-      : 'Codex turn completed.';
+      : 'Turn completed.';
     text.focus();
     return;
   }
@@ -96,7 +97,7 @@ function handleEvent(event) {
     return;
   }
   if (event.type === 'policy.violation') {
-    announcement.textContent = 'Codex requested a disallowed action. The sidecar denied it.';
+    announcement.textContent = 'The agent requested a disallowed action. The sidecar denied it.';
     return;
   }
   if (event.type === 'error' || event.type === 'protocol.error' || event.type === 'process.error') {
@@ -191,7 +192,23 @@ for (const [id, method] of Object.entries({ 'start-review': 'startReview', 'acce
 
 window.addEventListener('pagehide', () => session.disconnect());
 
+agentSelect.addEventListener('change', async () => {
+  setStatus('Connecting', 'connecting');
+  try {
+    await session.setAgent(agentSelect.value);
+    session.requestUpdateStatus();
+  } catch {
+    setStatus('Unavailable', 'closed');
+    showError('The local sidecar is unavailable.');
+  }
+});
+
 try {
+  const stored = await chrome.storage.session.get('resonantAgent');
+  if (stored.resonantAgent === 'hermes' || stored.resonantAgent === 'grok' || stored.resonantAgent === 'codex') {
+    session.agent = stored.resonantAgent;
+    agentSelect.value = stored.resonantAgent;
+  }
   await session.connect();
   session.requestUpdateStatus();
 } catch (error) {
