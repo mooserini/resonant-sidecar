@@ -1,0 +1,248 @@
+{
+  "schemaVersion": 2,
+  "runtimeContract": {
+    "packageType": "module",
+    "nodeEngine": ">=22",
+    "excludedResolutionFields": [
+      "main",
+      "imports",
+      "exports"
+    ]
+  },
+  "approvedCapabilities": {
+    "chromePermissions": [
+      "nativeMessaging",
+      "sidePanel",
+      "storage"
+    ],
+    "hostPermissions": [],
+    "listeners": [],
+    "lifecycleScripts": []
+  },
+  "approvedBundlePaths": [
+    "extension/manifest.json",
+    "extension/service-worker.js",
+    "extension/sidepanel-controller.js",
+    "extension/sidepanel.css",
+    "extension/sidepanel.html",
+    "extension/sidepanel.js",
+    "native-host/app-server-client.js",
+    "native-host/host.js",
+    "native-host/native-framing.js",
+    "native-host/sidecar-protocol.js",
+    "package.json",
+    "scripts/install-macos.js"
+  ],
+  "trustedTestCommands": [
+    [
+      "node",
+      "--check",
+      "native-host/app-server-client.js"
+    ],
+    [
+      "node",
+      "--check",
+      "native-host/host.js"
+    ],
+    [
+      "node",
+      "--check",
+      "native-host/native-framing.js"
+    ],
+    [
+      "node",
+      "--check",
+      "native-host/sidecar-protocol.js"
+    ],
+    [
+      "node",
+      "--check",
+      "extension/service-worker.js"
+    ],
+    [
+      "node",
+      "--check",
+      "extension/sidepanel-controller.js"
+    ],
+    [
+      "node",
+      "--check",
+      "extension/sidepanel.js"
+    ],
+    [
+      "node",
+      "--check",
+      "scripts/install-macos.js"
+    ],
+    [
+      "node",
+      "--experimental-vm-modules",
+      "review/trusted-harness.js",
+      "unit"
+    ],
+    [
+      "node",
+      "--experimental-vm-modules",
+      "review/trusted-harness.js",
+      "protocol"
+    ],
+    [
+      "node",
+      "--experimental-vm-modules",
+      "review/trusted-harness.js",
+      "continuity"
+    ],
+    [
+      "node",
+      "--experimental-vm-modules",
+      "review/trusted-harness.js",
+      "interruption"
+    ],
+    [
+      "node",
+      "--experimental-vm-modules",
+      "review/trusted-harness.js",
+      "negative-policy"
+    ]
+  ],
+  "receiptFields": [
+    "receiptId",
+    "reviewId",
+    "eventType",
+    "outcome",
+    "previousReceiptHash",
+    "projectEvidenceHash",
+    "osEvidenceHash",
+    "policySnapshotHash",
+    "verifierIdentities",
+    "activeBundleDigest",
+    "candidateBundleDigest",
+    "humanDecisionRef",
+    "createdAt"
+  ],
+  "stateTransitions": {
+    "available": [
+      "staged",
+      "custody-broken"
+    ],
+    "staged": [
+      "deterministic-review",
+      "review-failed",
+      "custody-broken"
+    ],
+    "deterministic-review": [
+      "codex-review",
+      "review-failed",
+      "custody-broken"
+    ],
+    "codex-review": [
+      "chrome-semantic-review",
+      "review-failed",
+      "custody-broken"
+    ],
+    "eligible": [
+      "human-accepted",
+      "rejected",
+      "custody-broken"
+    ],
+    "human-accepted": [
+      "activating",
+      "custody-broken"
+    ],
+    "activating": [
+      "activated",
+      "activation-failed",
+      "custody-broken"
+    ],
+    "activation-failed": [
+      "rolling-back",
+      "custody-broken"
+    ],
+    "rolling-back": [
+      "rolled-back",
+      "custody-broken"
+    ],
+    "activated": [],
+    "review-failed": [],
+    "rejected": [],
+    "rolled-back": [],
+    "custody-broken": [],
+    "chrome-semantic-review": [
+      "eligible",
+      "review-failed",
+      "custody-broken"
+    ]
+  },
+  "codexAttestationSchema": "policy/codex-attestation.v1.schema.json",
+  "semanticReviewers": [
+    {
+      "id": "codex-cli",
+      "required": true
+    },
+    {
+      "id": "chrome-language-model",
+      "required": true,
+      "modelIdentityAssurance": "not-attested"
+    }
+  ],
+  "chromeAnalysisSchema": "policy/chrome-language-model.v2.schema.json",
+  "applicationLimits": {
+    "maxEvidencePacketBytes": 131072,
+    "maxRawModelOutputBytes": 65536,
+    "maxOutstandingChromeInvocations": 1,
+    "readyToResultExpiryMs": 600000,
+    "inferenceTimeoutMs": 60000,
+    "automaticRetries": 0
+  },
+  "trustedControlPaths": [
+    "bootstrap/chrome-review-journal.js",
+    "bootstrap/host.js",
+    "bootstrap/native-proxy.js",
+    "bootstrap/recovery-state.js",
+    "bootstrap/runtime-lock.js",
+    "bootstrap/version-store.js",
+    "extension/chrome-review-adapter.js",
+    "extension/chrome-review-contract.js",
+    "extension/manifest.json",
+    "extension/service-worker.js",
+    "extension/sidepanel-controller.js",
+    "extension/sidepanel.css",
+    "extension/sidepanel.html",
+    "extension/sidepanel.js",
+    "native-host/native-framing.js",
+    "native-host/sidecar-protocol.js",
+    "policy/chrome-language-model.v2.schema.json",
+    "policy/codex-attestation.v1.schema.json",
+    "policy/review-policy.v1.json",
+    "policy/review-policy.v2.json",
+    "presentation/desktop-handoff.js",
+    "presentation/macos-dialog.js",
+    "review/bundle-manifest.js",
+    "review/candidate-source.js",
+    "review/canonical-json.js",
+    "review/capability-diff.js",
+    "review/chrome-provenance.js",
+    "review/chrome-review-bridge.js",
+    "review/chrome-review-contract.js",
+    "review/chrome-review.js",
+    "review/codex-prompt.js",
+    "review/codex-verifier.js",
+    "review/decision-nonce.js",
+    "review/deterministic-verifier.js",
+    "review/git-runner.js",
+    "review/macos-evidence.js",
+    "review/policy-registry.js",
+    "review/process-ownership.js",
+    "review/receipt-layout.js",
+    "review/receipt-store.js",
+    "review/redaction.js",
+    "review/review-coordinator.js",
+    "review/review-state.js",
+    "review/semantic-evidence.js",
+    "review/source-diff.js",
+    "review/trusted-harness.js",
+    "scripts/build-initial-bundle.js",
+    "scripts/install-macos.js",
+    "scripts/verify-install-plan.js"
+  ]
+}

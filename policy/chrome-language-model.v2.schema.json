@@ -1,0 +1,75 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "outcome",
+    "summary",
+    "findings"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "outcome": {
+      "enum": [
+        "no-blocking-concern",
+        "blocking-concern",
+        "inconclusive"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "category",
+          "file",
+          "location",
+          "explanation"
+        ],
+        "properties": {
+          "severity": {
+            "enum": [
+              "important",
+              "caution",
+              "observation"
+            ]
+          },
+          "category": {
+            "enum": [
+              "behavior",
+              "dependency",
+              "capability",
+              "provenance",
+              "coverage",
+              "other"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "explanation": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        }
+      }
+    }
+  }
+}
