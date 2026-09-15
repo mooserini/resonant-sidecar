@@ -2,7 +2,7 @@
 
 Date: 2026-09-14
 
-Status: Architectural direction approved in conversation on 2026-09-14; written amendment pending Tom's artifact review. No implementation, installation, migration, registration change, live model invocation, publication, or push is authorized by this document.
+Status: Approved by Tom after artifact review on 2026-09-14. No implementation, installation, migration, registration change, live model invocation, publication, or push is authorized by this document.
 
 ## Purpose
 
