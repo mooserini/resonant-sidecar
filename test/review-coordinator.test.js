@@ -5,8 +5,11 @@ import { VersionStore } from '../bootstrap/version-store.js';
 import { runtimeFixture, decisionFor, consumer } from './fixtures/runtime.js';
 import { sha256Bytes, canonicalJson } from '../review/canonical-json.js';
 import { readFileSync } from 'node:fs';
-import { chmod, writeFile, readFile } from 'node:fs/promises';
+import { chmod, writeFile, readFile, mkdtemp, readdir, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { ReceiptStore } from '../review/receipt-store.js';
 import { DecisionNonces } from '../review/decision-nonce.js';
 import { sha256Json } from '../review/canonical-json.js';
@@ -113,6 +116,23 @@ async function chromeCoordinatorFixture(t, options = {}) {
     settle: (reasonCode = null, extra = {}) => { const { type, packet, ...binding } = ready; return bridge.handleSettlement({ type: 'review.chromeResult', ...binding, rawText: reasonCode === null ? RAW : null, reasonCode, availabilityStatus: reasonCode ?? 'available', executionStatus: reasonCode === null ? 'completed' : 'not-run', ...extra }); },
     artifact: async () => (await f.receiptStore.verifyChain()).receipts.findLast(r => r.semanticReview)?.semanticReview,
   };
+}
+
+async function laterChromeAttempt(t, f, { reviewId = 'review-2', invocationId = 'invocation-review-2', largeSource = false } = {}) {
+  const staged = await f.stage(reviewId, largeSource ? '// '.repeat(60000) : '// B candidate'); const sent = [];
+  const bridge = new ChromeReviewBridge({ journal: f.journal, currentChannel: f.deps.chromeContext, clock: () => NOW, ...observations, send: ready => {
+    sent.push(ready); const { type, packet, ...binding } = ready;
+    bridge.handleSettlement({ type: 'review.chromeResult', ...binding, rawText: null, reasonCode: 'unavailable', availabilityStatus: 'unavailable', executionStatus: 'not-run' });
+  } });
+  t.after(() => bridge.close('connection-loss'));
+  const rebind = result => ({ ...result, candidateBundleDigest: staged.manifest.bundleDigest });
+  const deps = { ...f.deps, reviewId: () => reviewId, mintChromeInvocation: () => invocationId,
+    candidateSource: { inspect: async () => ({ state: 'available', manifest: staged.manifest }), stage: async () => staged },
+    deterministicReview: async input => rebind(await f.deps.deterministicReview(input)),
+    codexReview: async input => rebind(await f.deps.codexReview({ ...input, finalizeResult: result => input.finalizeResult(rebind(result)) })),
+    chromeReview: request => bridge.request(request), chromeReviewStatus: binding => bridge.status(binding), completeChromeReview: binding => bridge.complete(binding),
+  };
+  return { coordinator: new ReviewCoordinator(deps), deps, sent };
 }
 
 test('V2 withholds both nonces until Chrome terminal cleanup, permanent reread and journal mark', async t => {
@@ -323,8 +343,89 @@ test('V2 changed source after Chrome completion cannot satisfy the immutable evi
     await chmod(file, 0o600); await writeFile(file, '// changed during analysis'); await chmod(file, 0o400); return value;
   };
   const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
-  try { assert.notEqual((await work).state, 'eligible'); } catch (error) { assert.match(error.message, /[Cc]ustody/); }
+  assert.equal((await work).state, 'review-failed');
+  assert.equal((await f.artifact()).reasonCode, 'provenance-drift');
+  assert.equal(f.journal.snapshot().reasonCode, 'provenance-drift');
+  const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+  assert.equal((await new ReviewCoordinator({ ...f.deps, chromeJournal: journal }).resumePendingActivation()).state, 'review-failed');
   assert.equal(f.issued.length, 0);
+});
+
+for (const reason of ['api-absent', 'setup-required', 'setup-declined', 'unavailable', 'timeout', 'connection-loss', 'malformed-output', 'provenance-drift', 'custody-failure', 'cancellation', 'panel-closure', 'emergency-stop']) test(`V2 source drift preserves first terminal ${reason} across restart`, async t => {
+  const f = await chromeCoordinatorFixture(t); const run = f.deps.chromeReview;
+  f.deps.chromeReview = async request => {
+    const result = await run(request); const file = path.join(f.staged.bundleRoot, 'native-host/host.js');
+    await chmod(file, 0o600); await writeFile(file, '// drift after terminal failure'); await chmod(file, 0o400);
+    return result;
+  };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work);
+  if (['cancellation', 'panel-closure', 'emergency-stop'].includes(reason)) {
+    const { type, packet, ...binding } = f.ready();
+    f.bridge.handleSettlement({ type: 'review.chromeCancel', ...binding, reasonCode: reason, availabilityStatus: 'available', executionStatus: 'failed' });
+  } else f.settle(reason, ['api-absent', 'setup-required', 'setup-declined', 'unavailable'].includes(reason) ? {} : { availabilityStatus: 'available', executionStatus: 'failed' });
+  assert.equal((await work).state, 'review-failed');
+  assert.equal(f.journal.snapshot().reasonCode, reason);
+  assert.equal((await f.artifact()).reasonCode, reason === 'emergency-stop' ? 'cancellation' : reason);
+  const count = (await f.receiptStore.verifyChain()).receipts.length;
+  for (let i = 0; i < 2; i++) {
+    const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+    assert.equal((await new ReviewCoordinator({ ...f.deps, chromeJournal: journal }).resumePendingActivation()).state, 'review-failed');
+    assert.equal((await f.receiptStore.verifyChain()).receipts.length, count);
+  }
+  assert.equal(f.issued.length, 0);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+for (const reason of ['api-absent', 'setup-required', 'setup-declined', 'unavailable', 'malformed-output']) test(`V2 first terminal ${reason} preserves its trusted status despite result binding drift`, async t => {
+  const f = await chromeCoordinatorFixture(t); const run = f.deps.chromeReview;
+  f.deps.chromeReview = async request => { const result = structuredClone(await run(request)); result.binding.inputDigest = 'f'.repeat(64); return result; };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work);
+  f.settle(reason, reason === 'malformed-output' ? { availabilityStatus: 'available', executionStatus: 'failed' } : {});
+  assert.equal((await work).state, 'review-failed');
+  const artifact = await f.artifact();
+  assert.equal(artifact.reasonCode, reason); assert.equal(f.journal.snapshot().reasonCode, reason);
+  assert.equal(artifact.availabilityStatus, reason === 'malformed-output' ? 'available' : reason);
+  assert.equal(artifact.executionStatus, reason === 'malformed-output' ? 'failed' : 'not-run');
+  const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+  assert.equal((await new ReviewCoordinator({ ...f.deps, chromeJournal: journal }).resumePendingActivation()).state, 'review-failed');
+  assert.equal(f.issued.length, 0); assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+test('V2 FIFO source substitution stays bounded and permits emergency cancellation', async t => {
+  if (process.env.SIDECAR_TASK8_FIFO_CHILD !== '1') {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), 'sidecar-fifo-probe-'));
+    t.after(async () => {
+      async function unseal(directory) {
+        await chmod(directory, 0o700);
+        for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isDirectory()) await unseal(path.join(directory, entry.name));
+      }
+      await unseal(temporary); await rm(temporary, { recursive: true });
+    });
+    // A blocked synchronous open cannot honor an in-process test timeout.
+    const result = spawnSync(process.execPath, ['--test', '--test-name-pattern=^V2 FIFO source substitution stays bounded', fileURLToPath(import.meta.url)], {
+      env: { PATH: '/usr/bin:/bin', TMPDIR: temporary, SIDECAR_TASK8_FIFO_CHILD: '1' }, timeout: 10000, killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 65536,
+    });
+    assert.equal(result.error?.code, undefined, `FIFO probe must not block: ${result.error?.code}`);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return;
+  }
+  const f = await chromeCoordinatorFixture(t); const run = f.deps.chromeReview; let cancellation;
+  f.deps.chromeReview = async request => {
+    const result = await run(request); const file = path.join(f.staged.bundleRoot, 'native-host/host.js');
+    await chmod(path.dirname(file), 0o700); await unlink(file);
+    const fifo = spawnSync('/usr/bin/mkfifo', ['-m', '400', file]); assert.equal(fifo.status, 0);
+    await chmod(path.dirname(file), 0o500);
+    cancellation = new Promise(resolve => setImmediate(() => {
+      const { type, packet, ...binding } = f.ready();
+      resolve(f.bridge.handleSettlement({ type: 'review.chromeCancel', ...binding, reasonCode: 'emergency-stop', availabilityStatus: 'available', executionStatus: 'failed' }));
+    }));
+    return result;
+  };
+  const c = new ReviewCoordinator(f.deps); const work = c.startReview(); await f.waitChrome(work); f.settle();
+  assert.equal((await work).state, 'review-failed'); assert.equal(await cancellation, true);
+  assert.equal((await f.artifact()).reasonCode, 'provenance-drift');
+  assert.equal(f.journal.recoveryState(), 'receipted'); assert.equal(f.issued.length, 0);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
 });
 
 test('V2 startup converts an interrupted pending journal to one failed receipt and never resumes analysis', async t => {
@@ -343,6 +444,94 @@ test('V2 startup converts an interrupted pending journal to one failed receipt a
   assert.equal((await f.artifact()).reasonCode, 'terminal-receipt-interrupted');
   assert.equal(f.ready(), undefined); assert.equal(f.issued.length, 0);
   assert.equal((await f.events()).filter(state => state === 'review-failed').length, 1);
+});
+
+for (const loss of ['missing-journal', 'older-issued-artifact', 'truncated-used-history', 'unretained-extra-id']) test(`V2 retained invocation custody rejects ${loss}`, async t => {
+  const f = await chromeCoordinatorFixture(t); const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle('unavailable'); await work;
+  if (loss === 'older-issued-artifact' || loss === 'truncated-used-history') {
+    const next = await laterChromeAttempt(t, f, { largeSource: loss === 'older-issued-artifact' });
+    assert.equal((await next.coordinator.startReview()).state, 'review-failed');
+  }
+  const file = path.join(f.root, 'chrome-review-pending.json');
+  if (loss === 'missing-journal' || loss === 'older-issued-artifact') await unlink(file);
+  else {
+    const record = JSON.parse(await readFile(file));
+    record.usedInvocationIds = loss === 'truncated-used-history' ? [record.binding.invocationId] : ['never-receipted', ...record.usedInvocationIds];
+    await writeFile(file, canonicalJson(record) + '\n');
+  }
+  const before = (await f.receiptStore.verifyChain()).receipts.length;
+  for (let i = 0; i < 2; i++) {
+    const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+    await assert.rejects(() => new ReviewCoordinator({ ...f.deps, chromeJournal: journal }).resumePendingActivation(), /[Cc]ustody/);
+    assert.equal((await f.receiptStore.verifyChain()).receipts.length, before);
+  }
+  assert.equal(f.issued.length, 0); assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+for (const attack of ['erased-journal', 'truncated-history']) test(`V2 retained invocation custody stops ${attack} reuse before a new Chrome call`, async t => {
+  const f = await chromeCoordinatorFixture(t); const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle('unavailable'); await work;
+  const file = path.join(f.root, 'chrome-review-pending.json');
+  if (attack === 'erased-journal') await unlink(file);
+  else {
+    const next = await laterChromeAttempt(t, f); await next.coordinator.startReview();
+    const record = JSON.parse(await readFile(file)); record.usedInvocationIds = [record.binding.invocationId];
+    await writeFile(file, canonicalJson(record) + '\n');
+  }
+  const before = (await f.receiptStore.verifyChain()).receipts.length;
+  const reused = await laterChromeAttempt(t, f, { reviewId: 'review-reused', invocationId: 'invocation-review-1' });
+  await assert.rejects(() => reused.coordinator.startReview(), /[Cc]ustody/);
+  assert.equal(reused.sent.length, 0); assert.equal(f.issued.length, 0);
+  assert.equal((await f.receiptStore.verifyChain()).receipts.length, before);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+test('V2 retained invocation custody exempts only unissued incomplete-input history from the journal', async t => {
+  const f = await chromeCoordinatorFixture(t, { largeSource: true });
+  assert.equal((await f.coordinator.startReview()).state, 'review-failed');
+  const count = (await f.receiptStore.verifyChain()).receipts.length;
+  for (let i = 0; i < 2; i++) {
+    const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+    assert.equal((await new ReviewCoordinator({ ...f.deps, chromeJournal: journal }).resumePendingActivation()).state, 'review-failed');
+    assert.equal(journal.recoveryState(), 'empty');
+  }
+  assert.equal((await f.receiptStore.verifyChain()).receipts.length, count);
+  assert.equal(f.issued.length, 0); assert.deepEqual(f.effects, []);
+});
+
+for (const older of [false, true]) test(`V2 retained invocation custody forbids ${older ? 'older' : 'latest'} incomplete-input ID reuse`, async t => {
+  const f = await chromeCoordinatorFixture(t, { largeSource: true }); await f.coordinator.startReview();
+  if (older) { const next = await laterChromeAttempt(t, f); assert.equal((await next.coordinator.startReview()).state, 'review-failed'); }
+  const reused = await laterChromeAttempt(t, f, { reviewId: 'review-reused', invocationId: 'invocation-review-1' });
+  assert.equal((await reused.coordinator.startReview()).state, 'custody-broken');
+  assert.equal(reused.sent.length, 0); assert.equal(f.issued.length, 0);
+  assert.equal((await f.receiptStore.verifyChain()).receipts.filter(receipt => receipt.semanticReview?.invocationId === 'invocation-review-1').length, 1);
+  assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
+});
+
+for (const extra of [false, true]) test(`V2 retained invocation custody ${extra ? 'refuses an older unexplained ID beside' : 'reconciles only'} the current pending ID`, async t => {
+  const f = await chromeCoordinatorFixture(t); const work = f.coordinator.startReview(); await f.waitChrome(work); f.settle('unavailable'); await work;
+  const next = await laterChromeAttempt(t, f);
+  const crashed = new ReviewCoordinator({ ...next.deps, chromeReview: async request => { await f.journal.begin(request.binding); throw new Error('simulated interruption'); } });
+  await assert.rejects(() => crashed.startReview(), /[Cc]ustody/);
+  const file = path.join(f.root, 'chrome-review-pending.json');
+  if (extra) {
+    const record = JSON.parse(await readFile(file)); record.usedInvocationIds.splice(1, 0, 'unexplained-older-id');
+    await writeFile(file, canonicalJson(record) + '\n');
+  }
+  const count = (await f.receiptStore.verifyChain()).receipts.length;
+  for (let i = 0; i < 2; i++) {
+    const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: OTHER });
+    const restarted = new ReviewCoordinator({ ...f.deps, chromeJournal: journal });
+    if (extra) await assert.rejects(() => restarted.resumePendingActivation(), /[Cc]ustody/);
+    else {
+      assert.equal((await restarted.resumePendingActivation()).state, 'review-failed');
+      assert.equal(journal.recoveryState(), 'receipted');
+      assert.deepEqual(journal.snapshot().usedInvocationIds, ['invocation-review-1', 'invocation-review-2']);
+      assert.equal((await f.artifact()).reasonCode, 'terminal-receipt-interrupted');
+    }
+    assert.equal((await f.receiptStore.verifyChain()).receipts.length, count + (extra ? 0 : 1));
+  }
+  assert.equal(f.issued.length, 0); assert.equal((await f.versionStore.resolveActiveHost()).digest, f.first.manifest.bundleDigest);
 });
 
 for (const conflict of ['evidenceDigest', 'candidateDigest', 'invocationId', 'receiptHash', 'reasonCode']) test(`V2 startup refuses conflicting retained journal ${conflict}`, async t => {

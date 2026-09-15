@@ -80,6 +80,7 @@ export class ReviewCoordinator {
       if (this.#state && !terminalReview(this.#state, this.#d.policy)) await this.#move('custody-broken', 'policy-changed', false);
       this.#halted = true; throw new CustodyError('Policy changed');
     }
+    return chain;
   }
   async #move(next, reasonCode, check = true, semanticReview) {
     transitionReview(this.#state, next, this.#d.policy);
@@ -140,6 +141,10 @@ export class ReviewCoordinator {
       sourceDiff: await buildSourceDiff({ activeRoot: this.#active.bundleRoot, candidateRoot: this.#staged.bundleRoot, activeManifest: this.#active.manifest, candidateManifest: this.#staged.manifest }) });
     const startedAt = new Date(this.#d.clock()).toISOString();
     const invocationId = this.#d.mintChromeInvocation();
+    const retained = await this.#integrity();
+    // Even an incomplete request permanently reserves its artifact identity,
+    // although it never opens a bridge invocation or a journal entry.
+    if (retained.receipts.some(receipt => receipt.semanticReview?.invocationId === invocationId)) throw new CustodyError('Chrome invocation identity already retained');
     const deadline = new Date(Date.parse(startedAt) + this.#d.policy.applicationLimits.readyToResultExpiryMs).toISOString();
     const request = buildChromeReviewRequest({ ...common, invocationId, runtimeGeneration: context.runtimeGeneration, adapterDigest: context.adapterDigest, deadline });
     // Incomplete requests intentionally expose no packet. These hashes are
@@ -174,7 +179,7 @@ export class ReviewCoordinator {
         for (const file of manifest.files) {
           const name = path.join(root, file.path);
           if (realpathSync(name) !== name) return false;
-          const fd = openSync(name, constants.O_RDONLY | constants.O_NOFOLLOW);
+          const fd = openSync(name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
           try {
             const before = fstatSync(fd);
             const mode = before.mode & 0o7777;
@@ -219,7 +224,9 @@ export class ReviewCoordinator {
     try { value = snapshotChromeReviewValue(await this.#d.chromeReview({ binding: c.binding, packet: c.request.packet, deadline: c.binding.deadline })); }
     catch { value = null; }
     const terminal = this.#terminalChrome();
-    let reason = this.#chromeInputIntact() ? this.#chromeReason() : 'provenance-drift';
+    // A terminal failure is canonical. Later source drift can withhold a
+    // completed result, but cannot relabel an already failed invocation.
+    let reason = terminal.reasonCode !== 'completed' ? terminal.reasonCode : this.#chromeInputIntact() ? this.#chromeReason() : 'provenance-drift';
     if (!reason && (!value || canonicalJson(value.binding) !== canonicalJson(c.binding))) reason = 'provenance-drift';
     if (!reason && value.type === 'ChromeReviewResult') {
       try {
@@ -234,7 +241,9 @@ export class ReviewCoordinator {
     } else reason ??= 'provenance-drift';
     if (reason) {
       const status = this.#d.chromeReviewStatus(c.binding);
-      const observed = value?.type === 'ChromeReviewFailure' && canonicalJson(value.binding) === canonicalJson(c.binding) && reason === value.reasonCode;
+      // A first terminal failure and its status come from the exact-bound
+      // native owner, even if the returned result envelope later drifts.
+      const observed = terminal.reasonCode !== 'completed' || (value?.type === 'ChromeReviewFailure' && canonicalJson(value.binding) === canonicalJson(c.binding) && reason === value.reasonCode);
       artifact = this.#chromeArtifact({ reasonCode: reason, availabilityStatus: observed ? status.availabilityStatus : 'not-checked', executionStatus: observed && status.executionStatus === 'not-run' ? 'not-run' : 'failed' });
     }
     const favorable = artifact.eligibilityEffect === 'prerequisite-satisfied';
@@ -284,12 +293,27 @@ export class ReviewCoordinator {
   }
   async #recoverChrome(chain) {
     try {
+      const owners = new Map(), issued = new Set();
+      for (const receipt of chain.receipts) {
+        const artifact = receipt.semanticReview;
+        if (receipt.policySnapshotHash !== reviewPolicyDigest(2) || !artifact) continue;
+        const owner = owners.get(artifact.invocationId);
+        if (owner && owner !== receipt.reviewId) throw new CustodyError('Chrome invocation identity reused');
+        owners.set(artifact.invocationId, receipt.reviewId);
+        const unissued = artifact.reasonCode === 'incomplete-input' && artifact.coverageStatus === 'incomplete-input' && artifact.executionStatus === 'not-run' && artifact.availabilityStatus === 'not-checked' && artifact.analysis === null && artifact.analysisDigest === null && artifact.eligibilityEffect === 'candidate-withheld';
+        if (!unissued) issued.add(artifact.invocationId);
+      }
       await this.#d.chromeJournal.recover();
       const record = this.#d.chromeJournal.snapshot();
       if (!record) {
-        if (this.#state === 'chrome-semantic-review') throw new CustodyError('Missing Chrome journal');
+        if (issued.size || this.#state === 'chrome-semantic-review') throw new CustodyError('Missing Chrome journal');
         return;
       }
+      const used = new Set(record.usedInvocationIds);
+      const extra = record.usedInvocationIds.filter(id => !issued.has(id));
+      // Only the current unfinished invocation can precede its permanent
+      // artifact. Historical IDs are never dropped or silently reconstructed.
+      if ([...issued].some(id => !used.has(id)) || extra.length > 1 || (extra.length === 1 && (record.receiptCommitted || extra[0] !== record.binding.invocationId || owners.has(extra[0])))) throw new CustodyError('Chrome invocation history conflicts with journal');
       if (record.status !== 'terminal') throw new CustodyError('Chrome invocation still pending');
       const b = record.binding;
       const history = chain.receipts.filter(r => r.reviewId === b.reviewId);
