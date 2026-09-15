@@ -40,12 +40,13 @@ function safeError(error) {
 }
 
 let appServer;
+let grokBackend = false;
 try {
   const command = process.env.RESONANT_CODEX_COMMAND || 'codex';
   const args = parseArgs();
   const cwd = process.env.RESONANT_WORKSPACE || process.cwd();
-  const grok = process.env.RESONANT_AGENT === 'grok' || args.includes('stdio');
-  appServer = grok
+  grokBackend = process.env.RESONANT_AGENT === 'grok' || args.includes('stdio');
+  appServer = grokBackend
     ? new GrokAgentClient({ command, args, cwd })
     : new AppServerClient({ command, args, cwd });
 } catch (error) {
@@ -74,7 +75,7 @@ async function handleBrowserMessage(value) {
   // Only the stable trusted bootstrap may route review/refresh authority.
   // This replaceable child handles the unchanged conversation protocol alone.
   // update.status is bootstrap-only; ignore it on a conversation-only host.
-  if (value && value.type === 'update.status') return;
+  if (grokBackend && value && value.type === 'update.status') return;
   if (isLifecycleMessage(value)) throw new TypeError('Unsupported browser message type');
   const message = parseBrowserMessage(value);
 
