@@ -29,6 +29,7 @@
 - The same canonical source evidence feeds Codex and Chrome independently. Neither initial request contains the other reviewer's verdict or prose.
 - An unavailable, incomplete, malformed, unfavorable, inconclusive, stale, interrupted, or unsanitizable Chrome result withholds only the current candidate and preserves the active pin.
 - Model preparation is visible and user-triggered. Preparation never begins analysis; only a fresh **Run local analysis** click may do that.
+- Whenever Chrome review is available, the side panel identifies it as a Chrome-managed on-device model that may already be stored or updated by Chrome; this disclosure does not claim the sidecar controls Chrome's background component lifecycle.
 - Browser/model output never supplies trusted identities, digests, timestamps, permissions, paths, commands, URLs, nonce grants, policy, state, or activation decisions.
 - Existing V1 receipts and their hashes remain valid under V1 rules. V2 appends history; it never rewrites, reinterprets, or silently repairs it.
 - Generated task reports and capability receipts remain local and ignored. Track only code, schemas, tests, and explanatory documentation.
@@ -491,7 +492,7 @@ createChromeReviewAdapter({ languageModel, sendResult, sendCancel, onState, cloc
 
 - [ ] **Step 1: Write failing fake-`LanguageModel` lifecycle tests**
 
-Prove zero `LanguageModel` calls on installation, startup, panel opening, and update discovery. After the bound `review.chromeReady` packet arrives, permit exactly one bounded `availability()` feature-detection call while proving zero `create()` or `prompt()` calls. When preparation is required, assert the visible disclosure reads exactly **Chrome may download and store an on-device model. Preparation does not run analysis.** before the enabled **Prepare Chrome reviewer** button. Prove that button calls `create()` only from its direct click, sends no candidate prompt, destroys the preparation session, and does not call `run()`. Prove **Run local analysis** creates a separate fresh session and calls `prompt()` once.
+Prove zero `LanguageModel` calls on installation, startup, panel opening, and update discovery. After the bound `review.chromeReady` packet arrives, permit exactly one bounded `availability()` feature-detection call while proving zero `create()` or `prompt()` calls. In every available state, assert the visible notice reads exactly **Local analysis uses a Chrome-managed on-device model that may already be stored or updated on this device.** When preparation is required, assert the additional disclosure reads exactly **Chrome may download and store an on-device model. Preparation does not run analysis.** before the enabled **Prepare Chrome reviewer** button. Prove that button calls `create()` only from its direct click, sends no candidate prompt, destroys the preparation session, and does not call `run()`. Prove **Run local analysis** creates a separate fresh session and calls `prompt()` once.
 
 - [ ] **Step 2: Add failure and cancellation tests**
 
@@ -521,7 +522,7 @@ Use no tools, functions, sampling loop, repair prompt, session history, page con
 
 - [ ] **Step 4: Add accessible preparation/run/cancel states without exposing model prose**
 
-Add buttons **Prepare Chrome reviewer**, **Run local analysis**, and **Cancel analysis**. When preparation is required, render the exact resource-consequence disclosure **Chrome may download and store an on-device model. Preparation does not run analysis.** immediately before Prepare; the button stays disabled until that state and disclosure are visible. Preserve keyboard order, visible focus, the exact failure card, conversation input, conversation Stop, and the emergency Stop behavior. Route the emergency Stop through one controller method that first invalidates the active Chrome invocation/generation and initiates bound cancellation, then invokes the existing conversation interrupt; neither half waits for the other before the UI becomes stopped. Render fixed state labels only; never place raw candidate or model text in the DOM.
+Add buttons **Prepare Chrome reviewer**, **Run local analysis**, and **Cancel analysis**. Whenever either Prepare or Run can be shown, render the exact notice **Local analysis uses a Chrome-managed on-device model that may already be stored or updated on this device.** When preparation is required, also render **Chrome may download and store an on-device model. Preparation does not run analysis.** immediately before Prepare; the button stays disabled until that state and both disclosures are visible. Preserve keyboard order, visible focus, the exact failure card, conversation input, conversation Stop, and the emergency Stop behavior. Route the emergency Stop through one controller method that first invalidates the active Chrome invocation/generation and initiates bound cancellation, then invokes the existing conversation interrupt; neither half waits for the other before the UI becomes stopped. Render fixed state labels only; never place raw candidate or model text in the DOM.
 
 - [ ] **Step 5: Prove the manifest and fallback boundary are unchanged**
 
