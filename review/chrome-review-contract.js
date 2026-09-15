@@ -213,8 +213,9 @@ function analysisKeys(value, keys) {
 }
 
 /** Detach bounded plain JSON data without reading accessors or invoking toJSON.
- * structuredClone supplies the cross-platform proxy rejection that reflection
- * alone cannot provide. Only the descriptor snapshot is returned or retained. */
+ * Check each held object reference after checking its children: a proxy cannot
+ * escape the clone gate by replacing its slot in an ancestor. No ancestor is
+ * cloned until every encountered child has passed its own proxy check. */
 export function snapshotChromeReviewValue(value) {
   const ancestors = new Set();
   let nodes = 0;
@@ -261,13 +262,14 @@ export function snapshotChromeReviewValue(value) {
         result = '{' + parts.join(',') + '}';
         bytes += 2 + Math.max(0, keys.length - 1);
       }
+      analysisRequire(bytes <= 262144, 'structure byte limit');
+      try { structuredClone(item); } catch { throw new TypeError('Chrome analysis structure schema rejected'); }
       ancestors.delete(item);
     }
     analysisRequire(bytes <= 262144, 'structure byte limit');
     return result;
   }
   const encoded = encode(value, 0);
-  try { structuredClone(value); } catch { throw new TypeError('Chrome analysis structure schema rejected'); }
   return JSON.parse(encoded);
 }
 

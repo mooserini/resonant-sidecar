@@ -88,3 +88,31 @@ test('trusted binder rejects proxy and accessor envelopes without accepting cach
   }
   assert.equal(reads, 0);
 });
+
+for (const trap of ['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor']) {
+  test(`trusted binder rejects a ${trap} proxy that replaces its parent slot with an accessor`, async t => {
+    const input = await fixture(t);
+    const browser = input.browserObservation;
+    const original = browser.unavailableFields;
+    let getterCalls = 0;
+    browser.unavailableFields = new Proxy(original, {
+      [trap](...args) {
+        Object.defineProperty(browser, 'unavailableFields', { configurable: true, enumerable: true, get() { getterCalls++; return original; } });
+        return Reflect[trap](...args);
+      },
+    });
+    let error;
+    try { bindChromeReviewResult(input); } catch (caught) { error = caught; }
+    assert.deepEqual({ rejected: error instanceof TypeError, getterCalls }, { rejected: true, getterCalls: 0 });
+  });
+}
+
+test('trusted binder rejects a proxy that removes itself with a plain data replacement', async t => {
+  const input = await fixture(t);
+  const browser = input.browserObservation;
+  const original = browser.unavailableFields;
+  browser.unavailableFields = new Proxy(original, {
+    getPrototypeOf(target) { browser.unavailableFields = original; return Reflect.getPrototypeOf(target); },
+  });
+  assert.throws(() => bindChromeReviewResult(input), /structure|schema/i);
+});

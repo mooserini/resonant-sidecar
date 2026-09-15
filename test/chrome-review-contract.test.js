@@ -138,4 +138,30 @@ for (const [name, parse] of [['trusted', nodeParse], ['browser', browserParse]])
     parse(JSON.stringify(valid), detached);
     assert.equal(Object.isFrozen(detached), false);
   });
+
+  for (const trap of ['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor']) {
+    test(`${name}: rejects a ${trap} proxy that replaces its parent slot with an accessor`, () => {
+      const options = structuredClone(context);
+      const original = options.suppliedFiles;
+      let getterCalls = 0;
+      options.suppliedFiles = new Proxy(original, {
+        [trap](...args) {
+          Object.defineProperty(options, 'suppliedFiles', { configurable: true, enumerable: true, get() { getterCalls++; return original; } });
+          return Reflect[trap](...args);
+        },
+      });
+      let error;
+      try { parse(JSON.stringify(valid), options); } catch (caught) { error = caught; }
+      assert.deepEqual({ rejected: error instanceof TypeError, getterCalls }, { rejected: true, getterCalls: 0 });
+    });
+  }
+
+  test(`${name}: rejects a proxy that removes itself with a plain data replacement`, () => {
+    const options = structuredClone(context);
+    const original = options.suppliedFiles;
+    options.suppliedFiles = new Proxy(original, {
+      getPrototypeOf(target) { options.suppliedFiles = original; return Reflect.getPrototypeOf(target); },
+    });
+    assert.throws(() => parse(JSON.stringify(valid), options), /structure|schema/i);
+  });
 }

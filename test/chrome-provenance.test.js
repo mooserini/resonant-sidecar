@@ -63,3 +63,29 @@ test('provenance rejects proxies, getters and hidden identity fields', () => {
   }
   assert.equal(reads, 0);
 });
+
+for (const trap of ['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor']) {
+  test(`provenance rejects a ${trap} proxy that replaces its parent slot with an accessor`, () => {
+    const browser = structuredClone(browserObservation);
+    const original = browser.unavailableFields;
+    let getterCalls = 0;
+    browser.unavailableFields = new Proxy(original, {
+      [trap](...args) {
+        Object.defineProperty(browser, 'unavailableFields', { configurable: true, enumerable: true, get() { getterCalls++; return original; } });
+        return Reflect[trap](...args);
+      },
+    });
+    let error;
+    try { buildChromeProvenance({ browserObservation: browser, componentObservation }); } catch (caught) { error = caught; }
+    assert.deepEqual({ rejected: error instanceof TypeError, getterCalls }, { rejected: true, getterCalls: 0 });
+  });
+}
+
+test('provenance rejects a proxy that removes itself with a plain data replacement', () => {
+  const browser = structuredClone(browserObservation);
+  const original = browser.unavailableFields;
+  browser.unavailableFields = new Proxy(original, {
+    getPrototypeOf(target) { browser.unavailableFields = original; return Reflect.getPrototypeOf(target); },
+  });
+  assert.throws(() => buildChromeProvenance({ browserObservation: browser, componentObservation }), /structure|schema/i);
+});
