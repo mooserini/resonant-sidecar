@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -292,6 +292,38 @@ test('stored migration chain verifier catches mutations after its initial invent
     const verification = verifyStoredMigrationChain(plan, { afterInitialInventory: async () => { ready.resolve(); await release.promise; } });
     await ready.promise;
     try { await mutate(plan); } finally { release.resolve(); }
+    await assert.rejects(verification, /stored migration|receipt|custody|changed|entries/i);
+  });
+});
+
+test('stored migration chain verifier catches transient same-UID mutations restored before receipt reads', async t => {
+  const cases = [
+    ['add-remove', async plan => {
+      const extra = path.join(plan.paths.migrationReceipts, 'transient-extra');
+      await writeFile(extra, 'transient', { mode: 0o400 });
+      await unlink(extra);
+    }],
+    ['chmod-restore', async plan => {
+      const target = path.join(plan.paths.migrationReceipts, 'before.json');
+      await chmod(target, 0o600);
+      await chmod(target, 0o400);
+    }],
+    ['inode-swap-restore', async plan => {
+      const target = path.join(plan.paths.migrationReceipts, 'before.json');
+      const backup = path.join(plan.paths.migrationReceipts, '.before.original');
+      const bytes = await readFile(target);
+      await rename(target, backup);
+      await writeFile(target, bytes, { mode: 0o400 });
+      await unlink(target);
+      await rename(backup, target);
+    }],
+  ];
+  for (const [name, mutateAndRestore] of cases) await t.test(name, async subtest => {
+    const { plan } = await storedFixture(subtest);
+    const ready = Promise.withResolvers(); const release = Promise.withResolvers();
+    const verification = verifyStoredMigrationChain(plan, { afterInitialInventory: async () => { ready.resolve(); await release.promise; } });
+    await ready.promise;
+    try { await mutateAndRestore(plan); } finally { release.resolve(); }
     await assert.rejects(verification, /stored migration|receipt|custody|changed|entries/i);
   });
 });

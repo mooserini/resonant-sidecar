@@ -115,6 +115,12 @@ function moduleTokens(source, name) {
   const regexPrefix = new Set(['(', '[', '{', ',', ':', ';', '=', '!', '?', '&&', '||', '??', '=>', '+', '-', '*', '%', '&', '|', '^', '~', '<', '>']);
   const regexKeyword = new Set(['case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'return', 'throw', 'typeof', 'void', 'yield', 'await']);
   const controlCondition = new Set(['if', 'while', 'for', 'with', 'switch', 'catch']);
+  const generatedCodeOrLoader = new Set([
+    'eval', 'Function', 'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction',
+    'globalThis', 'global', 'require', 'createRequire', 'getBuiltinModule', 'Module',
+    '_load', 'dlopen', 'register', 'registerHooks', 'Script', 'compileFunction',
+    'runInContext', 'runInNewContext', 'runInThisContext', 'WebAssembly',
+  ]);
   const failSyntax = detail => fail(`unparseable trusted module syntax at ${name}: ${detail}`);
 
   function stringToken(start, quote) {
@@ -171,7 +177,9 @@ function moduleTokens(source, name) {
       if (source[index] === '\\') { index += 2; continue; }
       if (source[index] === '`') return index + 1;
       if (source[index] === '$' && source[index + 1] === '{') {
+        tokens.push({ type: 'template-expression-boundary', value: 'start', start: index });
         index = scan(index + 2, true);
+        tokens.push({ type: 'template-expression-boundary', value: 'end', start: index - 1 });
         continue;
       }
       index += 1;
@@ -196,7 +204,7 @@ function moduleTokens(source, name) {
         index = end + 2;
         continue;
       }
-      if (character === '/' && canStartRegex()) { index = regexLiteral(index); continue; }
+      if (character === '/' && (canStartRegex() || tokens.at(-1)?.type === 'template-expression-boundary' && tokens.at(-1).value === 'start')) { index = regexLiteral(index); continue; }
       if (character === "'" || character === '"') { index = stringToken(index, character); continue; }
       if (character === '`') {
         tokens.push({ type: 'template-boundary', value: 'start', start: index });
@@ -232,6 +240,12 @@ function moduleTokens(source, name) {
   }
 
   scan();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type === 'identifier' && generatedCodeOrLoader.has(token.value)) fail(`runtime loader or code generation is forbidden at ${name}`);
+    if (token.type === 'identifier' && token.value === 'constructor' && tokens[index - 1]?.value === '.') fail(`runtime loader or code generation is forbidden at ${name}`);
+    if (token.type === 'string' && token.value === 'constructor' && tokens[index - 1]?.value === '[' && tokens[index + 1]?.value === ']') fail(`runtime loader or code generation is forbidden at ${name}`);
+  }
   return tokens;
 }
 

@@ -87,10 +87,16 @@ may point Chrome Dev at the pinned bootstrap. Nothing targets Chrome Stable or
 adds a listener, capability, or Chrome permission.
 
 The bundle builder performs a declaration/capability comparison against the
-canonical policy; it does not claim to have compared live behavior. Its closed
-trusted import graph permits only explicit, runtime-recognized `node:` built-ins
-and rejects fake built-in names, ambient packages, unresolved relative imports,
-and non-literal dynamic imports.
+canonical policy; it does not claim to have compared live behavior. Its lexical
+gate closes the declared trusted import graph to pinned relative files and
+explicit, runtime-recognized `node:` built-ins. It also rejects non-literal
+dynamic imports and executable uses of ambient loaders or string-code
+generators such as `require`, `createRequire`, `eval`, and the `Function`
+family. The pinned `review/trusted-harness.js` deliberately uses Node's VM
+module API with its own fixed linker and disabled string/Wasm generation. The
+trusted bootstrap remains reviewed trusted code, not a general JavaScript
+sandbox; the lexical gate is one input to exact-hash human approval, not a
+claim that arbitrary semantic code generation is impossible.
 
 After an approved preparation, verify the sealed on-disk migration chain against
 the exact reviewed plan before opening Chrome Dev:

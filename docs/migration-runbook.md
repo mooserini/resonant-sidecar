@@ -111,8 +111,10 @@ files owned by the current user with no symlinks or hardlinks; canonical JSON
 bytes; exact sidecar hashes; an intact predecessor chain; and exact registration,
 inventory, source, and install-hash binding to the structurally verified plan.
 It repeats the full directory inventory plus every root/file identity and mode at
-the final boundary so an observed concurrent add, removal, swap, chmod, or
-hardlink fails closed. Its JSON output names
+the final boundary. Root and file identities bind nanosecond change and
+modification timestamps across the verification window, so an observed
+concurrent or transient add, removal, swap, chmod, or hardlink fails closed. Its
+JSON output names
 the install hash, receipt root, and final receipt hash. A failure is a hard stop:
 do not open or load the stable extension, do not change registration, and do not
 repair or delete evidence. Retain the reviewed plan and the named

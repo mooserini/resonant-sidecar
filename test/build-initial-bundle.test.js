@@ -65,6 +65,17 @@ for (const [name, source, pattern] of [
   ['dynamic import inside a template interpolation', "const load = `${await import('ambient-package')}`;\n", /ambient|import graph/i],
   ['non-literal dynamic import', "const target = './host.js'; await import(target);\n", /non-literal|import graph/i],
   ['unlisted relative dynamic import', "await import('./not-pinned.js');\n", /escapes|import graph/i],
+  ['direct eval import', "eval(\"import('ambient-eval-package')\");\n", /code generation|runtime loader|ambient/i],
+  ['indirect eval import', "(0, eval)(\"import('ambient-eval-package')\");\n", /code generation|runtime loader|ambient/i],
+  ['member eval import', "globalThis.eval(\"import('ambient-eval-package')\");\n", /code generation|runtime loader|ambient/i],
+  ['Function constructor import', "new Function(\"return import('ambient-function-package')\");\n", /code generation|runtime loader|ambient/i],
+  ['Function-family constructor import', "new AsyncFunction(\"return import('ambient-function-package')\");\n", /code generation|runtime loader|ambient/i],
+  ['member Function import', "new globalThis.Function(\"return import('ambient-function-package')\");\n", /code generation|runtime loader|ambient/i],
+  ['constructor-property import', "(async () => {}).constructor(\"return import('ambient-constructor-package')\");\n", /code generation|runtime loader|ambient/i],
+  ['constructor-bracket import', "(function () {})['constructor'](\"return import('ambient-constructor-package')\")();\n", /code generation|runtime loader|ambient/i],
+  ['CommonJS require', "require('ambient-require-package');\n", /runtime loader|ambient/i],
+  ['createRequire loader', "import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)('ambient-require-package');\n", /runtime loader|ambient/i],
+  ['process builtin loader', "process.getBuiltinModule('module').createRequire(import.meta.url)('ambient-require-package');\n", /runtime loader|ambient/i],
 ]) test(`trusted closure rejects ${name}`, async () => {
   const files = repositoryFiles(); files['bootstrap/host.js'] = source;
   await assert.rejects(() => inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git }), pattern);
@@ -101,6 +112,18 @@ test('trusted closure recognizes regex literals after control-flow conditions', 
     "import { readFile } from 'node:fs/promises';",
     "import test from 'node:test';",
     'void readFile; void test;',
+    '',
+  ].join('\n');
+  assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);
+});
+
+test('trusted closure ignores safe import-shaped regex text inside template interpolation', async () => {
+  const files = repositoryFiles();
+  files['bootstrap/host.js'] = [
+    "const safe = `${/import\\('ambient-regex-package'\\)/.test('safe')}`;",
+    "const nested = `outer:${true ? /eval\\(.*import/.test('safe') : false}`;",
+    "import { readFile } from 'node:fs/promises';",
+    'void safe; void nested; void readFile;',
     '',
   ].join('\n');
   assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);
