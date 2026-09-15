@@ -69,9 +69,11 @@ function artifactPlan(files, root, stripPrefix = '') {
     return { path: relative, bytes: file.bytes.length, sha256: file.sha256, mode: 0o400, destination: path.join(root, relative) };
   }).sort((a, b) => compare(a.path, b.path));
 }
-function runtimeEntry({ project, stateRoot, userHome, nodePath, codexPath, trustedCodexHome, receiptRoot }) {
-  const config = canonicalJson({ project, stateRoot, userHome, nodePath, codexPath, trustedCodexHome, receiptRoot });
+function runtimeEntry({ project, stateRoot, userHome, nodePath, codexPath, trustedCodexHome, receiptRoot, stableExtension, controlPlane }) {
+  const config = canonicalJson({ project, stateRoot, userHome, nodePath, codexPath, trustedCodexHome, receiptRoot, stableExtension,
+    stableFiles: controlPlane.files.filter(file => file.path.startsWith('extension/')).map(file => ({ path: file.path.slice(10), sha256: file.sha256 })), adapterDigest: controlPlane.adapterDigest, contractDigest: controlPlane.contractDigest });
   return `import { execFileSync } from 'node:child_process';
+import { constants, openSync, fstatSync, readFileSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runBootstrap } from './bootstrap/host.js';
@@ -83,13 +85,30 @@ import { inspectLocalCandidate, stageLocalCandidate } from './review/candidate-s
 import { runDeterministicReview } from './review/deterministic-verifier.js';
 import { runCodexReview } from './review/codex-verifier.js';
 import { collectMacOSEvidence } from './review/macos-evidence.js';
+import { sha256Bytes } from './review/canonical-json.js';
+import { loadReviewPolicy } from './review/policy-registry.js';
+import { buildChromeProvenance } from './review/chrome-provenance.js';
 import { createMacOSDialog } from './presentation/macos-dialog.js';
 import { createDesktopHandoff } from './presentation/desktop-handoff.js';
-import policy from './policy/review-policy.v1.json' with { type: 'json' };
 import schema from './policy/codex-attestation.v1.schema.json' with { type: 'json' };
 
 const CONFIG = Object.freeze(${config});
+const policy = loadReviewPolicy(2);
 const CHROME = Object.freeze({ executablePath: '/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev', identifier: 'com.google.Chrome.dev', teamId: 'EQHXZ8M8AV' });
+function heldDigest(file, expected) {
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.nlink !== 1 || (expected && (info.mode & 0o7777) !== 0o400)) throw new Error('Pinned control custody changed');
+    const bytes = readFileSync(fd); const digest = sha256Bytes(bytes);
+    if (bytes.length !== info.size || (expected && digest !== expected)) throw new Error('Pinned control bytes changed');
+    return digest;
+  } finally { closeSync(fd); }
+}
+const observedAt = new Date().toISOString();
+const browserObservation = Object.freeze({ executableSha256: heldDigest(CHROME.executablePath), version: null, signingIdentity: null, observedAt, unavailableFields: ['signingIdentity', 'version'] });
+const componentObservation = Object.freeze({ status: 'not-collected', metadataSource: null, version: null, artifactSha256: null, observedAt: null });
+buildChromeProvenance({ browserObservation, componentObservation });
 const rows = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,comm='], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, maxBuffer: 1024 * 1024 }).split('\\n').map(line => line.match(/^\\s*(\\d+)\\s+(\\d+)\\s+(\\/.+)$/)).filter(Boolean).map(match => ({ pid: Number(match[1]), ppid: Number(match[2]), executablePath: match[3] }));
 const cdpPorts = chromePid => { try { return [...new Set(execFileSync('/usr/sbin/lsof', ['-nP', '-a', '-p', String(chromePid), '-iTCP', '-sTCP:LISTEN', '-Fn'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, maxBuffer: 1024 * 1024 }).split('\\n').map(line => line.match(/^n(?:127\\.0\\.0\\.1|\\[::1\\]):(\\d+)$/)?.[1]).filter(Boolean).map(Number))].sort((a,b)=>a-b); } catch { return []; } };
 function ownershipPolicy(phase, runtime) {
@@ -99,16 +118,27 @@ function ownershipPolicy(phase, runtime) {
   if (phase === 'verification') { const verifier = table.find(row => row.pid === runtime?.verifier?.pid && row.ppid === process.pid); if (!verifier) throw new Error('Verifier ownership unavailable'); processes.push({ pid: verifier.pid, name: 'verifier', parent: 'bootstrap', executablePath: verifier.executablePath }); }
   return { phase, chromeExited: false, processes, expectedChrome: { ...CHROME, cdpPorts: cdpPorts(chrome.pid) } };
 }
-const receiptStore = new ReceiptStore({ root: CONFIG.receiptRoot });
+const receiptStore = new ReceiptStore({ root: CONFIG.receiptRoot, policy });
 const nonceStore = new DecisionNonces({ root: CONFIG.stateRoot });
 let coordinator; let controller;
 const versionStore = new VersionStore({ projectRoot: CONFIG.project, consumeDecision: decision => coordinator.consumeDecision(decision), verifyConsumedDecision: binding => coordinator.verifyConsumedDecision(binding) });
 const runtime = Object.freeze({ snapshot: () => controller.runtimeState, refreshPending: decision => controller.refreshPending(decision), refreshRecovered: binding => controller.refreshRecovered(binding), stopCandidate: () => controller.stopCandidate(), restartPrevious: () => controller.restartPrevious(), withTransition: operation => controller.withTransition(operation) });
 const candidateSource = Object.freeze({ inspect: input => inspectLocalCandidate({ repoRoot: CONFIG.project, activeDigest: input.activeDigest, policy: input.policy }), stage: input => stageLocalCandidate({ repoRoot: CONFIG.project, reviewId: input.reviewId, quarantineRoot: path.join(CONFIG.project, 'runtime/quarantine'), policy: input.policy }) });
 const deterministicReview = input => runDeterministicReview({ ...input, active: { ...input.active, root: input.active.bundleRoot } });
-coordinator = new ReviewCoordinator({ receiptStore, nonceStore, versionStore, candidateSource, deterministicReview, codexReview: runCodexReview, collectEvidence: collectMacOSEvidence, ownershipPolicy, runtime, policy, deterministicInput: { trustedHarness: { root: fileURLToPath(new URL('.', import.meta.url)) } }, codexInput: { codexPath: CONFIG.codexPath, trustedCodexHome: CONFIG.trustedCodexHome, schema, diff: 'Committed local bundle; canonical manifests and deterministic checks are authoritative.' } });
+const chromeJournal = Object.freeze({ recover: () => controller.chromeReviewJournal.recover(), snapshot: () => controller.chromeReviewJournal.snapshot(), finish: (...args) => controller.chromeReviewJournal.finish(...args), markReceipted: hash => controller.chromeReviewJournal.markReceipted(hash) });
+const chromeContext = () => {
+  for (const file of CONFIG.stableFiles) heldDigest(path.join(CONFIG.stableExtension, file.path), file.sha256);
+  heldDigest(fileURLToPath(new URL('./review/chrome-review-contract.js', import.meta.url)), CONFIG.contractDigest);
+  return { ...controller.chromeReviewIdentity, adapterDigest: CONFIG.adapterDigest, browserObservation: { ...browserObservation, executableSha256: heldDigest(CHROME.executablePath) }, componentObservation };
+};
+// The pinned ReviewCoordinator builds SourceDiff + SemanticEvidence once from
+// held active/staged bytes, then supplies independent copies to both reviewers.
+coordinator = new ReviewCoordinator({ receiptStore, nonceStore, versionStore, candidateSource, deterministicReview, codexReview: runCodexReview, collectEvidence: collectMacOSEvidence, ownershipPolicy, runtime, policy,
+  chromeJournal, chromeContext, chromeReview: input => controller.requestChromeReview(input), mintChromeInvocation: () => controller.mintChromeInvocation(), chromeReviewStatus: binding => controller.chromeReviewStatus(binding), completeChromeReview: binding => controller.completeChromeReview(binding),
+  deterministicInput: { trustedHarness: { root: fileURLToPath(new URL('.', import.meta.url)), stableExtension: { root: CONFIG.stableExtension, files: CONFIG.stableFiles } } }, codexInput: { codexPath: CONFIG.codexPath, trustedCodexHome: CONFIG.trustedCodexHome, schema } });
 const presentation = Object.freeze({ ...createMacOSDialog(), ...createDesktopHandoff({ receiptRoot: CONFIG.receiptRoot, codexPath: CONFIG.codexPath }) });
-controller = await runBootstrap({ store: versionStore, nodePath: CONFIG.nodePath, codexPath: CONFIG.codexPath, workspace: CONFIG.project, userHome: CONFIG.userHome, codexHome: path.join(CONFIG.userHome, '.codex'), coordinator, receiptStore, presentation });
+controller = await runBootstrap({ store: versionStore, nodePath: CONFIG.nodePath, codexPath: CONFIG.codexPath, workspace: CONFIG.project, userHome: CONFIG.userHome, codexHome: path.join(CONFIG.userHome, '.codex'), coordinator, receiptStore, presentation,
+  chromeReview: { projectRoot: CONFIG.project, browserObservation, componentObservation } });
 await controller.closed;
 `;
 }
@@ -149,7 +179,8 @@ export function buildInstallPlan({ extensionId, expectedCurrentHash, currentInst
   const recovery = path.join(runtime, 'migration-recovery', expectedCurrentHash);
   const migrationReceipts = path.join(runtime, 'migration-receipts', expectedCurrentHash);
   const paths = { launcher: launcherPath, manifest: manifestPath, runtime, trustedBootstrap, stableExtension, reviewHome, activeVersion, activeBundle: path.join(activeVersion, 'bundle'), activePin: path.join(runtime, 'active', 'pin.json'), recoveryState: path.join(runtime, 'recovery-state.json'), installationWitness: path.join(runtime, 'installations', 'migration-v1.json'), recovery, migrationReceipts, journal: path.join(runtime, 'migration-journal.json') };
-  const entry = runtimeEntry({ project: root, stateRoot: runtime, userHome: homeDir, nodePath, codexPath, trustedCodexHome: reviewHome, receiptRoot: path.join(root, 'review-receipts') });
+  if (!sourceInspection.controlPlane || !sourceInspection.stableExtension) throw new TypeError('V2 sealed control inspection required');
+  const entry = runtimeEntry({ project: root, stateRoot: runtime, userHome: homeDir, nodePath, codexPath, trustedCodexHome: reviewHome, receiptRoot: path.join(root, 'review-receipts'), stableExtension, controlPlane: sourceInspection.controlPlane });
   const launcher = [
     '#!/bin/sh',
     `exec ${shellQuote(nodePath)} ${shellQuote(path.join(trustedBootstrap, 'runtime-entry.js'))}`,
@@ -161,7 +192,7 @@ export function buildInstallPlan({ extensionId, expectedCurrentHash, currentInst
   trustedFiles.push({ path: 'package.json', bytes: Buffer.byteLength('{"type":"module"}\n'), sha256: sha256Bytes('{"type":"module"}\n'), mode: 0o400, destination: path.join(trustedBootstrap, 'package.json') });
   trustedFiles.push({ path: 'runtime-entry.js', bytes: Buffer.byteLength(entry), sha256: sha256Bytes(entry), mode: 0o400, destination: path.join(trustedBootstrap, 'runtime-entry.js') });
   trustedFiles.sort((a, b) => compare(a.path, b.path));
-  const extensionSource = sourceInspection.bundle.files.filter(file => file.relativePath.startsWith('extension/'));
+  const extensionSource = sourceInspection.stableExtension.files;
   const stableExtensionFiles = artifactPlan(extensionSource, stableExtension, 'extension/');
   const bundleManifestContents = `${canonicalJson(sourceInspection.bundle.manifest)}\n`;
   const bundleManifestArtifact = { path: 'manifest.json', bytes: Buffer.byteLength(bundleManifestContents), sha256: sha256Bytes(bundleManifestContents), mode: 0o400, destination: path.join(activeVersion, 'manifest.json') };
@@ -171,7 +202,7 @@ export function buildInstallPlan({ extensionId, expectedCurrentHash, currentInst
   const installationWitnessContents = `${canonicalJson(pin)}\n`;
   const runtimeEntryArtifact = artifact(path.join(trustedBootstrap, 'runtime-entry.js'), entry, 0o400);
   const core = {
-    schemaVersion: 1, mode: 'dry-run', browser: 'Google Chrome Dev', extensionId, expectedCurrentHash, sourceCommit: sourceInspection.sourceCommit, paths,
+    schemaVersion: 2, reviewPolicyVersion: 2, controlPlane: structuredClone(sourceInspection.controlPlane), mode: 'dry-run', browser: 'Google Chrome Dev', extensionId, expectedCurrentHash, sourceCommit: sourceInspection.sourceCommit, paths,
     extensionIdentity: { expectedId: extensionId, observedStablePathId: null, state: 'unverified' },
     registration: { state: 'unchanged-pending-stable-id-proof', launcherSha256: currentInstallation.launcher.sha256, manifestSha256: currentInstallation.manifest.sha256 },
     runtimeDirectory: { destination: runtime, mode: 0o700 },
@@ -315,7 +346,7 @@ export async function migrateInstallation(plan, { reviewedInstallHash, regenerat
 
     const trustedExtras = new Map([['runtime-entry.js', payload.runtimeEntry], ['package.json', '{"type":"module"}\n']]);
     await stageTree(plan.paths.trustedBootstrap, plan.trustedBootstrap.files, payload.sourceInspection.trustedBootstrap.files, trustedExtras, durability);
-    await stageTree(plan.paths.stableExtension, plan.stableExtension.files, payload.sourceInspection.bundle.files, new Map(), durability);
+    await stageTree(plan.paths.stableExtension, plan.stableExtension.files, payload.sourceInspection.stableExtension.files, new Map(), durability);
     const versionFiles = plan.bundle.files.map(file => ({ ...file, destination: path.join(plan.paths.activeBundle, file.path) }));
     await ensureDirectory(path.dirname(plan.paths.activeVersion), 0o700, durability);
     const pendingVersion = `${plan.paths.activeVersion}.${randomUUID()}.pending`;

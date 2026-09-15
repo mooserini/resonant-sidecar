@@ -362,7 +362,7 @@ export class ReviewCoordinator {
       await this.#evidence('before', this.#d.runtime.snapshot());
       await this.#move('deterministic-review');
       const deterministic = sanitizeEvidence(await this.#d.deterministicReview({ ...this.#d.deterministicInput, staged: this.#staged, active: this.#active, policy: clone(this.#d.policy) }), this.#d.policy);
-      this.#project.testResults = deterministic;
+      this.#project.testResults = clone(deterministic);
       if (!this.#boundResult(deterministic) || !Array.isArray(deterministic.checks) || deterministic.checks.length === 0 || deterministic.checks.some(c => c.passed !== true)) {
         await this.#move('review-failed', 'deterministic-failed'); return this.#view();
       }

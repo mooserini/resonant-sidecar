@@ -8,8 +8,12 @@ import { createContext, SourceTextModule, SyntheticModule } from 'node:vm';
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
-const sources = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-const context = createContext({ Buffer, process: Object.freeze({ cwd: () => '/test', env: Object.freeze({}) }) }, { codeGeneration: { strings: false, wasm: false } });
+const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+const v2 = process.argv[3] === '--policy-version=2';
+assert.ok(process.argv.length === (v2 ? 4 : 3));
+const sources = v2 ? payload.sources : payload;
+const trustedSources = v2 ? payload.trustedSources : {};
+const context = createContext({ Buffer, ...(v2 ? { TextEncoder, TextDecoder } : {}), process: Object.freeze({ cwd: () => '/test', env: Object.freeze({}) }) }, { codeGeneration: { strings: false, wasm: false } });
 const plain = value => JSON.parse(JSON.stringify(value));
 let approval;
 let pendingChild;
@@ -64,16 +68,26 @@ const builtins = {
   'node:events': { EventEmitter },
   'node:readline': { default: readline },
 };
-async function load(file) {
-  assert.ok(['native-host/native-framing.js', 'native-host/sidecar-protocol.js', 'native-host/app-server-client.js', 'extension/sidepanel-controller.js'].includes(file));
-  const module = new SourceTextModule(sources[file], { context, identifier: file });
-  await module.link(specifier => {
+const modules = new Map();
+async function linkModule(file) {
+  const trusted = v2 && ['extension/chrome-review-adapter.js', 'extension/chrome-review-contract.js'].includes(file);
+  assert.ok(trusted || ['native-host/native-framing.js', 'native-host/sidecar-protocol.js', 'native-host/app-server-client.js', 'extension/sidepanel-controller.js'].includes(file));
+  if (modules.has(file)) return modules.get(file);
+  const module = new SourceTextModule(trusted ? trustedSources[file] : sources[file], { context, identifier: file });
+  modules.set(file, module);
+  await module.link(async specifier => {
+    if (v2 && ((file === 'extension/sidepanel-controller.js' && ['./chrome-review-adapter.js', './chrome-review-contract.js'].includes(specifier))
+      || (file === 'extension/chrome-review-adapter.js' && specifier === './chrome-review-contract.js'))) return linkModule(`extension/${specifier.slice(2)}`);
     const exports = builtins[specifier];
     assert.ok(file === 'native-host/app-server-client.js' && exports, 'Unapproved candidate import');
     return new SyntheticModule(Object.keys(exports), function () {
       for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
     }, { context });
   });
+  return module;
+}
+async function load(file) {
+  const module = await linkModule(file);
   await module.evaluate({ timeout: 1000 });
   return module.namespace;
 }

@@ -1,4 +1,5 @@
 import { canonicalJson } from './canonical-json.js';
+import { assertSupportedReviewPolicy } from './policy-registry.js';
 
 const TRUSTED_CONTROL = /^(?:bootstrap|review|policy|presentation)\//;
 const DETECTORS = [
@@ -34,6 +35,18 @@ export function compareCapabilities({ active, candidate, policy }) {
   const before = body(active);
   const after = body(candidate);
   const reasons = new Set();
+  const v2 = policy.schemaVersion === 2;
+  const controls = new Set(v2 ? assertSupportedReviewPolicy(policy).trustedControlPaths : []);
+  if (v2) {
+    const oldFiles = new Map(before.files.map(file => [file.path, file]));
+    const newFiles = new Map(after.files.map(file => [file.path, file]));
+    for (const name of new Set([...oldFiles.keys(), ...newFiles.keys(), ...Object.keys(active.sources ?? {}), ...Object.keys(candidate.sources ?? {})])) {
+      if (!controls.has(name) && !TRUSTED_CONTROL.test(name)) continue;
+      const old = oldFiles.get(name), next = newFiles.get(name);
+      if (!old || !next || old.sha256 !== next.sha256 || old.bytes !== next.bytes || old.mode !== next.mode
+          || active.sources?.[name] !== candidate.sources?.[name]) reasons.add('control-plane-migration-required');
+    }
+  }
   for (const [key, reason] of [
     ['chromePermissions', 'chrome-permission-added'],
     ['hostPermissions', 'host-permission-added'],
@@ -51,7 +64,7 @@ export function compareCapabilities({ active, candidate, policy }) {
   for (const file of after.files) {
     const previous = previousFiles.get(file.path);
     if ((file.mode & 0o111) & ~(previous?.mode & 0o111)) reasons.add('executable-added');
-    if (TRUSTED_CONTROL.test(file.path)) reasons.add('trusted-control-modified');
+    if (!v2 && TRUSTED_CONTROL.test(file.path)) reasons.add('trusted-control-modified');
   }
   for (const [file, source] of Object.entries(candidate.sources ?? {})) {
     if (source === active.sources?.[file]) continue;

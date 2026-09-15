@@ -1,11 +1,17 @@
 #!/usr/bin/env node
 
 import { constants } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { lstat, open, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
+import { loadReviewPolicy, reviewPolicyDigest } from '../review/policy-registry.js';
+import { TRUSTED_BOOTSTRAP_FILES, STABLE_EXTENSION_FILES } from './build-initial-bundle.js';
+
+const V2 = loadReviewPolicy(2);
+const CHROME_SCHEMA_DIGEST = sha256Json(JSON.parse(readFileSync(new URL('../policy/chrome-language-model.v2.schema.json', import.meta.url), 'utf8')));
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -60,8 +66,8 @@ function verifyArtifactList(files, name, root) {
 }
 
 export function verifyInstallPlan(plan) {
-  exact(plan, ['schemaVersion', 'mode', 'browser', 'extensionId', 'expectedCurrentHash', 'sourceCommit', 'extensionIdentity', 'registration', 'runtimeDirectory', 'reviewHome', 'codexExecutable', 'paths', 'before', 'bundle', 'trustedBootstrap', 'runtimeEntry', 'stableExtension', 'activePin', 'baseline', 'launcher', 'manifest', 'inventoryHash', 'receipts', 'installHash'], 'plan');
-  if (plan.schemaVersion !== 1 || plan.mode !== 'dry-run' || plan.browser !== 'Google Chrome Dev' || !EXTENSION_ID.test(plan.extensionId) || !SHA256.test(plan.expectedCurrentHash) || !COMMIT.test(plan.sourceCommit)) fail('identity');
+  exact(plan, ['schemaVersion', 'reviewPolicyVersion', 'controlPlane', 'mode', 'browser', 'extensionId', 'expectedCurrentHash', 'sourceCommit', 'extensionIdentity', 'registration', 'runtimeDirectory', 'reviewHome', 'codexExecutable', 'paths', 'before', 'bundle', 'trustedBootstrap', 'runtimeEntry', 'stableExtension', 'activePin', 'baseline', 'launcher', 'manifest', 'inventoryHash', 'receipts', 'installHash'], 'plan');
+  if (plan.schemaVersion !== 2 || plan.reviewPolicyVersion !== 2 || plan.mode !== 'dry-run' || plan.browser !== 'Google Chrome Dev' || !EXTENSION_ID.test(plan.extensionId) || !SHA256.test(plan.expectedCurrentHash) || !COMMIT.test(plan.sourceCommit)) fail('identity');
   exact(plan.paths, ['launcher', 'manifest', 'runtime', 'trustedBootstrap', 'stableExtension', 'reviewHome', 'activeVersion', 'activeBundle', 'activePin', 'recoveryState', 'installationWitness', 'recovery', 'migrationReceipts', 'journal'], 'paths');
   for (const [name, value] of Object.entries(plan.paths)) absolute(value, name);
   if (!plan.paths.manifest.includes('/Google/Chrome Dev/NativeMessagingHosts/') || plan.paths.manifest.includes('/Google/Chrome/NativeMessagingHosts/')) fail('browser target');
@@ -98,6 +104,26 @@ export function verifyInstallPlan(plan) {
   verifyArtifactList(plan.bundle.files, 'bundle', plan.paths.activeBundle);
   verifyArtifactList(plan.trustedBootstrap.files, 'trusted bootstrap', plan.paths.trustedBootstrap);
   verifyArtifactList(plan.stableExtension.files, 'stable extension', plan.paths.stableExtension);
+  const pathsOf = files => files.map(file => file.path);
+  if (canonicalJson(pathsOf(plan.bundle.files)) !== canonicalJson(V2.approvedBundlePaths)
+      || canonicalJson(pathsOf(plan.trustedBootstrap.files)) !== canonicalJson([...TRUSTED_BOOTSTRAP_FILES, 'package.json', 'runtime-entry.js'].sort())
+      || canonicalJson(pathsOf(plan.stableExtension.files)) !== canonicalJson(STABLE_EXTENSION_FILES.map(file => file.slice(10)))) fail('frozen control inventory');
+  const control = plan.controlPlane;
+  exact(control, ['files', 'digest', 'policyDigest', 'schemaDigest', 'adapterDigest', 'contractDigest'], 'control plane');
+  if (!Array.isArray(control.files) || canonicalJson(pathsOf(control.files)) !== canonicalJson(V2.trustedControlPaths)) fail('frozen control inventory');
+  for (const file of control.files) {
+    exact(file, ['path', 'bytes', 'sha256', 'mode'], 'control file');
+    if (!Number.isSafeInteger(file.bytes) || file.bytes < 0 || !SHA256.test(file.sha256) || file.mode !== 0o644) fail('control file identity');
+    const copies = [...plan.bundle.files.filter(copy => copy.path === file.path), ...plan.trustedBootstrap.files.filter(copy => copy.path === file.path),
+      ...plan.stableExtension.files.filter(copy => `extension/${copy.path}` === file.path)];
+    if (copies.some(copy => copy.sha256 !== file.sha256 || copy.bytes !== file.bytes)) fail('control file identity');
+  }
+  const identity = name => control.files.find(file => file.path === name);
+  if (control.digest !== sha256Json(control.files) || control.policyDigest !== reviewPolicyDigest(2) || control.schemaDigest !== CHROME_SCHEMA_DIGEST
+      || control.adapterDigest !== identity('extension/chrome-review-adapter.js').sha256
+      || control.contractDigest !== identity('extension/chrome-review-contract.js').sha256 || control.contractDigest !== identity('review/chrome-review-contract.js').sha256) fail('control digest binding');
+  if (plan.trustedBootstrap.digest !== sha256Json(control.files.filter(file => TRUSTED_BOOTSTRAP_FILES.includes(file.path)).map(({ path, sha256, mode }) => ({ path, sha256, mode })))
+      || plan.stableExtension.digest !== sha256Json(plan.stableExtension.files.map(({ path, sha256, mode }) => ({ path, sha256, mode })))) fail('control graph digest');
   exact(plan.bundle.manifestArtifact, ['path', 'bytes', 'sha256', 'mode', 'destination'], 'bundle manifest artifact');
   if (plan.bundle.manifestArtifact.path !== 'manifest.json' || plan.bundle.manifestArtifact.destination !== path.join(plan.paths.activeVersion, 'manifest.json') || plan.bundle.manifestArtifact.mode !== 0o400 || !Number.isSafeInteger(plan.bundle.manifestArtifact.bytes) || plan.bundle.manifestArtifact.bytes < 1 || plan.bundle.manifestArtifact.sha256 !== plan.bundle.manifestDigest) fail('bundle manifest artifact');
   exact(plan.activePin, ['contents', 'bytes', 'sha256', 'mode', 'destination'], 'active pin');

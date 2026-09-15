@@ -18,6 +18,7 @@ import {
 } from './bundle-manifest.js';
 import { canonicalJson, sha256Bytes, sha256Json } from './canonical-json.js';
 import { localGit } from './git-runner.js';
+import { assertSupportedReviewPolicy } from './policy-registry.js';
 
 const COMMIT = /^[0-9a-f]{40}$/;
 const REVIEW_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -81,7 +82,12 @@ function validatePolicy(policy) {
   if (files.some((filePath, index) => filePath === files[index - 1])) {
     throw sourceError('policy-invalid');
   }
-  return { files, schemaVersion: policy.schemaVersion };
+  // V2 versions review policy and receipts; the payload manifest remains the
+  // existing bundle format understood by VersionStore and both prompt gates.
+  if (policy.schemaVersion === 2) {
+    try { assertSupportedReviewPolicy(policy); } catch { throw sourceError('policy-invalid'); }
+  }
+  return { files, schemaVersion: policy.schemaVersion === 2 ? 1 : policy.schemaVersion };
 }
 
 function decodeJson(bytes) {

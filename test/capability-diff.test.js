@@ -2,6 +2,32 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { compareCapabilities } from '../review/capability-diff.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
+
+for (const file of loadReviewPolicy(2).trustedControlPaths) {
+  test(`V2 control-plane migration required for changed, added or removed ${file}`, () => {
+    const active = baseline();
+    active.files.push({ path: file, bytes: 10, mode: 0o644, sha256: 'b'.repeat(64) });
+    for (const kind of ['changed', 'added', 'removed', 'source-only']) {
+      const before = structuredClone(active), candidate = structuredClone(active);
+      if (kind === 'changed') candidate.files[1].sha256 = 'c'.repeat(64);
+      if (kind === 'added') before.files.pop();
+      if (kind === 'removed') candidate.files.pop();
+      if (kind === 'source-only') candidate.sources[file] = '// different';
+      const result = compareCapabilities({ active: before, candidate, policy: loadReviewPolicy(2) });
+      assert.ok(result.checks.some(check => check.reasonCode === 'control-plane-migration-required'), `${file}: ${kind}`);
+    }
+  });
+}
+
+test('V2 conversation candidate reaches review with byte-identical included controls', () => {
+  const active = baseline();
+  for (const file of loadReviewPolicy(2).trustedControlPaths) active.files.push({ path: file, bytes: 10, mode: 0o644, sha256: 'b'.repeat(64) });
+  const candidate = structuredClone(active);
+  candidate.files[0].sha256 = 'c'.repeat(64);
+  candidate.sources['native-host/host.js'] = 'export const value = 2;';
+  assert.equal(compareCapabilities({ active, candidate, policy: loadReviewPolicy(2) }).passed, true);
+});
 
 const policy = {
   approvedCapabilities: { chromePermissions: ['storage'], hostPermissions: [], listeners: [], lifecycleScripts: [] },

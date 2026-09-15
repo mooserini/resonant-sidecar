@@ -10,10 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { assertBundleManifest, assertSafeRelativePath } from '../review/bundle-manifest.js';
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { localGit } from '../review/git-runner.js';
+import { loadReviewPolicy, reviewPolicyDigest } from '../review/policy-registry.js';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PINNED_POLICY = JSON.parse(await readFile(new URL('../policy/review-policy.v1.json', import.meta.url), 'utf8'));
-const PINNED_POLICY_DIGEST = '2c800a3dbb7520e37129213f0dabb648bca6cde03ed3180c91faee1f868f0821';
+const PINNED_POLICY = loadReviewPolicy(2);
+const PINNED_POLICY_DIGEST = '0d2dd5d21fd49431cd0153a1d30d151d5200ecbb176b177750202c2e79fdddd0';
 const COMMIT = /^[0-9a-f]{40}$/;
 const SAFE_MODE = new Map([['100644', 0o644]]);
 const LIFECYCLE = new Set(['preinstall', 'install', 'postinstall', 'preuninstall', 'uninstall', 'postuninstall', 'prepack', 'prepare', 'preprepare', 'postprepare', 'prepublish', 'publish', 'postpublish', 'prepublishOnly', 'postpack', 'preversion', 'version', 'postversion', 'pretest', 'posttest', 'prestop', 'stop', 'poststop', 'prestart', 'start', 'poststart', 'prerestart', 'restart', 'postrestart', 'preshrinkwrap', 'shrinkwrap', 'postshrinkwrap']);
@@ -22,6 +23,7 @@ const compare = (left, right) => Buffer.compare(Buffer.from(left, 'utf8'), Buffe
 // This is an installer-owned trust graph, not the candidate-bundle allowlist.
 // Every relative import reachable from runtime-entry.js must terminate here.
 export const TRUSTED_BOOTSTRAP_FILES = Object.freeze([
+  'bootstrap/chrome-review-journal.js',
   'bootstrap/host.js',
   'bootstrap/native-proxy.js',
   'bootstrap/recovery-state.js',
@@ -31,12 +33,18 @@ export const TRUSTED_BOOTSTRAP_FILES = Object.freeze([
   'native-host/sidecar-protocol.js',
   'policy/codex-attestation.v1.schema.json',
   'policy/review-policy.v1.json',
+  'policy/review-policy.v2.json',
+  'policy/chrome-language-model.v2.schema.json',
   'presentation/desktop-handoff.js',
   'presentation/macos-dialog.js',
   'review/bundle-manifest.js',
   'review/candidate-source.js',
   'review/canonical-json.js',
   'review/capability-diff.js',
+  'review/chrome-provenance.js',
+  'review/chrome-review-bridge.js',
+  'review/chrome-review-contract.js',
+  'review/chrome-review.js',
   'review/codex-prompt.js',
   'review/codex-verifier.js',
   'review/decision-nonce.js',
@@ -44,12 +52,24 @@ export const TRUSTED_BOOTSTRAP_FILES = Object.freeze([
   'review/git-runner.js',
   'review/macos-evidence.js',
   'review/process-ownership.js',
+  'review/policy-registry.js',
+  'review/receipt-layout.js',
   'review/receipt-store.js',
   'review/redaction.js',
   'review/review-coordinator.js',
   'review/review-state.js',
+  'review/semantic-evidence.js',
+  'review/source-diff.js',
   'review/trusted-harness.js',
 ].sort(compare));
+
+export const STABLE_EXTENSION_FILES = Object.freeze([
+  'extension/chrome-review-adapter.js', 'extension/chrome-review-contract.js',
+  'extension/manifest.json', 'extension/service-worker.js', 'extension/sidepanel-controller.js',
+  'extension/sidepanel.css', 'extension/sidepanel.html', 'extension/sidepanel.js',
+]);
+const INSTALLER_FILES = ['scripts/build-initial-bundle.js', 'scripts/install-macos.js', 'scripts/verify-install-plan.js'];
+if (canonicalJson([...TRUSTED_BOOTSTRAP_FILES, ...STABLE_EXTENSION_FILES, ...INSTALLER_FILES].sort(compare)) !== canonicalJson(PINNED_POLICY.trustedControlPaths)) fail('frozen control graph mismatch');
 
 function fail(message) { throw new Error(`Initial bundle inspection failed: ${message}`); }
 function plain(value) { return value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value)); }
@@ -107,7 +127,7 @@ function artifacts(snapshot, names) {
   });
 }
 
-function moduleTokens(source, name) {
+function moduleTokens(source, name, inspectLoaders = true) {
   const tokens = [];
   const parentheses = [];
   const identifierStart = character => /[A-Za-z_$]/.test(character ?? '');
@@ -125,10 +145,15 @@ function moduleTokens(source, name) {
 
   function staticComputedName(tokens, openIndex) {
     let value = '';
+    let escaped = false;
     for (let index = openIndex + 1, wantString = true; index < tokens.length; index += 1) {
-      if (tokens[index].value === ']') return wantString ? null : value;
+      if (tokens[index].value === ']') {
+        if (wantString) return null;
+        if (escaped) failSyntax('escaped computed property names are forbidden');
+        return value;
+      }
       if (wantString && tokens[index].type === 'string' && !tokens[index].escaped) value += tokens[index].value;
-      else if (wantString && tokens[index].type === 'string' && tokens[index].escaped) failSyntax('escaped computed property names are forbidden');
+      else if (wantString && tokens[index].type === 'string' && tokens[index].escaped) escaped = true;
       else if (!wantString && tokens[index].value !== '+') return null;
       else if (wantString) return null;
       wantString = !wantString;
@@ -254,7 +279,7 @@ function moduleTokens(source, name) {
   }
 
   scan();
-  for (let index = 0; index < tokens.length; index += 1) {
+  for (let index = 0; inspectLoaders && index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token.type === 'identifier' && generatedCodeOrLoader.has(token.value)) fail(`runtime loader or code generation is forbidden at ${name}`);
     if (token.type === 'identifier' && token.value === 'constructor' && tokens[index - 1]?.value === '.') fail(`runtime loader or code generation is forbidden at ${name}`);
@@ -266,8 +291,8 @@ function moduleTokens(source, name) {
   return tokens;
 }
 
-function importSpecifiers(source, name) {
-  const tokens = moduleTokens(source, name);
+function importSpecifiers(source, name, inspectLoaders = true) {
+  const tokens = moduleTokens(source, name, inspectLoaders);
   const specifiers = [];
   const literal = token => {
     if (token?.type !== 'string' || token.escaped) fail(`non-literal or escaped import at ${name}`);
@@ -315,12 +340,13 @@ function importSpecifiers(source, name) {
   return specifiers;
 }
 
-function assertClosedImports(snapshot, names) {
+function assertClosedImports(snapshot, names, browser = false) {
   const allowed = new Set(names);
   for (const name of names.filter(value => value.endsWith('.js'))) {
     const source = snapshot.get(name).bytes.toString('utf8');
-    for (const specifier of importSpecifiers(source, name)) {
+    for (const specifier of importSpecifiers(source, name, !browser)) {
       if (specifier.startsWith('node:')) {
+        if (browser) fail(`Node import in stable extension import graph at ${name}`);
         if (!isBuiltin(specifier)) fail(`unknown Node builtin in trusted import graph at ${name}`);
         continue;
       }
@@ -334,7 +360,7 @@ function assertClosedImports(snapshot, names) {
 export async function inspectInitialBundle({ repoRoot, policy = PINNED_POLICY, git = localGit } = {}) {
   exactPolicy(policy);
   if (typeof repoRoot !== 'string' || !path.isAbsolute(repoRoot) || path.normalize(repoRoot) !== repoRoot) fail('repository path');
-  const allFiles = [...new Set([...policy.approvedBundlePaths, ...TRUSTED_BOOTSTRAP_FILES])].sort(compare);
+  const allFiles = [...new Set([...policy.approvedBundlePaths, ...policy.trustedControlPaths])].sort(compare);
   for (const name of allFiles) assertSafeRelativePath(name);
   const sourceCommit = await head(git, repoRoot);
   const dirty = await gitBytes(git, repoRoot, ['status', '--porcelain=v1', '--untracked-files=all']);
@@ -352,16 +378,19 @@ export async function inspectInitialBundle({ repoRoot, policy = PINNED_POLICY, g
   if (await head(git, repoRoot) !== sourceCommit) fail('committed HEAD changed');
   if ((await gitBytes(git, repoRoot, ['status', '--porcelain=v1', '--untracked-files=all'])).length) fail('source must remain clean');
   assertClosedImports(snapshot, TRUSTED_BOOTSTRAP_FILES);
+  assertClosedImports(snapshot, STABLE_EXTENSION_FILES, true);
+  if (!snapshot.get('review/chrome-review-contract.js').bytes.equals(snapshot.get('extension/chrome-review-contract.js').bytes)) fail('Chrome contract copies differ');
 
-  const committedPolicy = decodeJson(snapshot.get('policy/review-policy.v1.json').bytes, 'committed policy');
+  const committedPolicy = decodeJson(snapshot.get('policy/review-policy.v2.json').bytes, 'committed policy');
   if (sha256Json(committedPolicy) !== PINNED_POLICY_DIGEST || canonicalJson(committedPolicy) !== canonicalJson(policy)) fail('committed policy changed');
+  if (sha256Json(decodeJson(snapshot.get('policy/review-policy.v1.json').bytes, 'historical policy')) !== reviewPolicyDigest(1)) fail('historical policy changed');
   const extensionManifest = decodeJson(snapshot.get('extension/manifest.json').bytes, 'extension manifest');
   const packageJson = decodeJson(snapshot.get('package.json').bytes, 'package.json');
   const declared = capabilities(extensionManifest, packageJson);
   const deps = dependencies(packageJson);
   const bundleFiles = artifacts(snapshot, [...policy.approvedBundlePaths].sort(compare));
   const unsigned = {
-    schemaVersion: policy.schemaVersion,
+    schemaVersion: 1, // Bundle format is independent of the selected review policy.
     sourceCommit,
     files: bundleFiles.map(file => ({ path: file.relativePath, bytes: file.bytes.length, sha256: file.sha256, mode: file.mode })),
     capabilities: declared,
@@ -384,7 +413,12 @@ export async function inspectInitialBundle({ repoRoot, policy = PINNED_POLICY, g
     ],
   };
   if (!declarationComparison.passed) fail('V1 declaration comparison failed');
-  return Object.freeze({ sourceCommit, bundle: { manifest, files: bundleFiles }, trustedBootstrap, declarationComparison });
+  const controlFiles = artifacts(snapshot, policy.trustedControlPaths).map(file => ({ path: file.relativePath, bytes: file.bytes.length, sha256: file.sha256, mode: file.mode }));
+  const controlPlane = { files: controlFiles, digest: sha256Json(controlFiles), policyDigest: PINNED_POLICY_DIGEST,
+    schemaDigest: sha256Json(decodeJson(snapshot.get(policy.chromeAnalysisSchema).bytes, 'Chrome schema')),
+    adapterDigest: sha256Bytes(snapshot.get('extension/chrome-review-adapter.js').bytes),
+    contractDigest: sha256Bytes(snapshot.get('review/chrome-review-contract.js').bytes) };
+  return Object.freeze({ sourceCommit, bundle: { manifest, files: bundleFiles }, trustedBootstrap, stableExtension: { files: artifacts(snapshot, STABLE_EXTENSION_FILES) }, controlPlane, declarationComparison });
 }
 
 async function safeDestination(destination) {

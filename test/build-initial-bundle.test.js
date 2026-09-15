@@ -5,9 +5,33 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import policy from '../policy/review-policy.v1.json' with { type: 'json' };
+import policy from '../policy/review-policy.v2.json' with { type: 'json' };
 import { sha256Bytes } from '../review/canonical-json.js';
 import { TRUSTED_BOOTSTRAP_FILES, inspectInitialBundle, materializeInitialBundle } from '../scripts/build-initial-bundle.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
+
+test('V2 inspector closes the exact frozen 38-file bootstrap and eight-file extension graph', async () => {
+  const v2 = loadReviewPolicy(2);
+  const stable = v2.trustedControlPaths.filter(file => file.startsWith('extension/'));
+  const bootstrap = v2.trustedControlPaths.filter(file => !file.startsWith('extension/') && !file.startsWith('scripts/'));
+  assert.equal(bootstrap.length, 38);
+  assert.deepEqual(TRUSTED_BOOTSTRAP_FILES, bootstrap);
+  const files = Object.fromEntries(await Promise.all([...new Set([...v2.trustedControlPaths, ...v2.approvedBundlePaths])].map(async file => [file, await readFile(new URL(`../${file}`, import.meta.url))])));
+  const result = await inspectInitialBundle({ repoRoot: '/repo', policy: v2, git: fakeRepository(files).git });
+  assert.equal(result.bundle.manifest.schemaVersion, 1);
+  assert.deepEqual(result.stableExtension.files.map(file => file.relativePath), stable);
+  assert.deepEqual(result.controlPlane.files.map(file => file.path), v2.trustedControlPaths);
+  assert.equal(result.controlPlane.contractDigest, sha256Bytes(files['review/chrome-review-contract.js']));
+});
+
+test('V2 inspector refuses split Chrome contracts and escaping stable imports', async () => {
+  const v2 = loadReviewPolicy(2);
+  const files = Object.fromEntries(await Promise.all([...new Set([...v2.trustedControlPaths, ...v2.approvedBundlePaths])].map(async file => [file, await readFile(new URL(`../${file}`, import.meta.url))])));
+  for (const [file, suffix, pattern] of [
+    ['extension/chrome-review-contract.js', '\n// split contract\n', /contract/i],
+    ['extension/chrome-review-adapter.js', "\nimport '../native-host/host.js';\n", /import graph/i],
+  ]) await assert.rejects(() => inspectInitialBundle({ repoRoot: '/repo', policy: v2, git: fakeRepository({ ...files, [file]: Buffer.concat([files[file], Buffer.from(suffix)]) }).git }), pattern);
+});
 
 const COMMIT = 'c'.repeat(40);
 
@@ -33,10 +57,13 @@ function fakeRepository(files, { dirty = '', mutateHead = false, modes = {} } = 
 
 function repositoryFiles() {
   const files = {};
-  for (const name of new Set([...policy.approvedBundlePaths, ...TRUSTED_BOOTSTRAP_FILES])) files[name] = `// ${name}\n`;
+  for (const name of new Set([...policy.approvedBundlePaths, ...policy.trustedControlPaths])) files[name] = `// ${name}\n`;
   files['extension/manifest.json'] = JSON.stringify({ manifest_version: 3, permissions: policy.approvedCapabilities.chromePermissions, host_permissions: [] });
   files['package.json'] = JSON.stringify({ type: 'module', engines: { node: '>=22' }, scripts: { test: 'node --test' } });
-  files['policy/review-policy.v1.json'] = JSON.stringify(policy);
+  files['policy/review-policy.v1.json'] = JSON.stringify(loadReviewPolicy(1));
+  files['policy/review-policy.v2.json'] = JSON.stringify(policy);
+  files['policy/chrome-language-model.v2.schema.json'] = '{}';
+  files['extension/chrome-review-contract.js'] = files['review/chrome-review-contract.js'];
   files['policy/codex-attestation.v1.schema.json'] = '{}';
   return files;
 }
@@ -85,6 +112,7 @@ for (const [name, source] of [
   ['escaped eval identifier', String.raw`\u0065val("import('ambient')")`],
   ['escaped constructor identifier', String.raw`(async()=>{}).constr\u0075ctor("return import('ambient')")()`],
   ['computed createRequire property', `m['create' + 'Require'](import.meta.url)('ambient')`],
+  ['escaped computed loader property', String.raw`m['create' + 'Requ\u0069re'](import.meta.url)('ambient')`],
   ['computed builtin loader chain', `process['getBuiltin' + 'Module']('module')['create' + 'Require'](import.meta.url)('ambient')`],
 ]) {
   test(`trusted closure rejects ${name}`, async () => {

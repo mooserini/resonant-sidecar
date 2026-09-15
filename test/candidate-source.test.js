@@ -9,6 +9,15 @@ import { promisify } from 'node:util';
 import { inspectLocalCandidate, stageLocalCandidate } from '../review/candidate-source.js';
 import { runGit } from '../review/git-runner.js';
 import { createFakeGit } from './fixtures/fake-git.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
+
+test('registered V2 review policy stages unchanged bundle format V1', async t => {
+  const repoRoot = await temporaryRoot(t), v2 = loadReviewPolicy(2);
+  const files = Object.fromEntries(await Promise.all(v2.approvedBundlePaths.map(async file => [file, { bytes: await readFile(new URL(`../${file}`, import.meta.url), 'utf8') }])));
+  const staged = await stageLocalCandidate({ repoRoot, reviewId: 'v2-format', quarantineRoot: path.join(repoRoot, 'runtime/quarantine'), policy: v2, git: createFakeGit({ files }) });
+  assert.equal(staged.manifest.schemaVersion, 1);
+  assert.deepEqual(staged.manifest.files.map(file => file.path), v2.approvedBundlePaths);
+});
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const DIGEST = 'c66b92d3b6a97c24cc27b611911e0076f0dbec28f34259f22cbd18011fe6bfd3';

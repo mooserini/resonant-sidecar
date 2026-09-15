@@ -6,12 +6,15 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { buildBundleManifest } from '../review/bundle-manifest.js';
 import { runDeterministicReview } from '../review/deterministic-verifier.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
+import { sha256Bytes } from '../review/canonical-json.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const policy = JSON.parse(await readFile(path.join(root, 'policy/review-policy.v1.json')));
 const commit = 'a'.repeat(40);
 
-async function setup(t, changes = {}) {
+async function setup(t, changes = {}, version = 1) {
+  const selectedPolicy = loadReviewPolicy(version);
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'sidecar-verifier-'));
   const bundleRoot = path.join(temporary, 'bundle');
   await mkdir(bundleRoot);
@@ -28,10 +31,15 @@ async function setup(t, changes = {}) {
     await unseal(temporary);
     await rm(temporary, { recursive: true });
   });
-  const active = await buildBundleManifest({ root, files: policy.approvedBundlePaths, sourceCommit: commit, schemaVersion: 1 });
+  const activeRoot = path.join(temporary, 'active');
+  for (const file of policy.approvedBundlePaths) {
+    await mkdir(path.dirname(path.join(activeRoot, file)), { recursive: true });
+    await cp(path.join(root, version === 1 && file === 'extension/sidepanel-controller.js' ? 'test/fixtures/v1-sidepanel-controller.js' : file), path.join(activeRoot, file));
+  }
+  const active = await buildBundleManifest({ root: activeRoot, files: policy.approvedBundlePaths, sourceCommit: commit, schemaVersion: 1 });
   for (const file of policy.approvedBundlePaths) {
     await mkdir(path.dirname(path.join(bundleRoot, file)), { recursive: true });
-    await cp(path.join(root, file), path.join(bundleRoot, file));
+    await cp(path.join(activeRoot, file), path.join(bundleRoot, file));
     if (Object.hasOwn(changes, file)) await writeFile(path.join(bundleRoot, file), changes[file]);
   }
   const manifest = await buildBundleManifest({ root: bundleRoot, files: policy.approvedBundlePaths, sourceCommit: commit, schemaVersion: 1 });
@@ -43,8 +51,39 @@ async function setup(t, changes = {}) {
     directories.add(path.dirname(path.join(bundleRoot, file)));
   }
   for (const directory of directories) await chmod(directory, 0o500);
-  return { staged: { bundleRoot, manifestPath, manifest }, active: { manifest: active, root }, policy, trustedHarness: { root }, temporary };
+  const stableExtension = { root: path.join(root, 'extension'), files: await Promise.all(loadReviewPolicy(2).trustedControlPaths.filter(file => file.startsWith('extension/')).map(async file => ({ path: file.slice(10), sha256: sha256Bytes(await readFile(path.join(root, file))) }))) };
+  return { staged: { bundleRoot, manifestPath, manifest }, active: { manifest: active, root: activeRoot }, policy: selectedPolicy, trustedHarness: { root, ...(version === 2 ? { stableExtension } : {}) }, temporary };
 }
+
+test('V2 fixed harness reviews a conversation candidate with pinned active Chrome imports', async t => {
+  const source = await readFile(path.join(root, 'native-host/host.js'), 'utf8');
+  const input = await setup(t, { 'native-host/host.js': `${source}\n// conversation update\n` }, 2);
+  const result = await runDeterministicReview(input);
+  assert.equal(result.passed, true, JSON.stringify(result));
+  assert.ok(result.checks.some(check => check.name === 'continuity' && check.passed));
+});
+
+test('V2 deterministic review accepts the actual sealed active bundle custody modes', async t => {
+  const input = await setup(t, {}, 2);
+  for (const file of input.active.manifest.files) await chmod(path.join(input.active.root, file.path), 0o400);
+  const result = await runDeterministicReview(input);
+  assert.equal(result.passed, true, JSON.stringify(result));
+});
+
+test('V2 deterministic review refuses adapter identity drift before its first subprocess', async t => {
+  const input = await setup(t, {}, 2);
+  input.trustedHarness.stableExtension.files.find(file => file.path === 'chrome-review-adapter.js').sha256 = 'f'.repeat(64);
+  input.trustedHarness.runner = () => assert.fail('No process before pinned control verification');
+  const result = await runDeterministicReview(input);
+  assert.ok(result.checks.some(check => check.reasonCode === 'control-plane-migration-required'), JSON.stringify(result));
+});
+
+test('V1 retains its historical controller bytes and rejects the V2 import graph', async t => {
+  assert.equal(sha256Bytes(await readFile(path.join(root, 'test/fixtures/v1-sidepanel-controller.js'))), '51ce0d9952d73eb93521cca2224a34f744bf746c783ed405c36404bf1a3e4ac2');
+  const input = await setup(t, { 'extension/sidepanel-controller.js': await readFile(path.join(root, 'extension/sidepanel-controller.js')) });
+  const result = await runDeterministicReview(input);
+  assert.equal(result.passed, false);
+});
 
 test('real fixed harness passes the baseline and reports every required check', async t => {
   const input = await setup(t);

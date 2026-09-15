@@ -37,21 +37,21 @@ npm run smoke:real
 
 The deterministic real smoke test starts one native host, creates a Codex thread, completes a turn, stops the host, starts a second host, resumes the same thread, and completes two context-dependent turns. It prints thread/turn IDs and SHA-256 reply receipts rather than a transcript.
 
-## Current V1 attachment
+## Sealed V2 preparation — no live migration
 
-1. Open `chrome://extensions` in the intended local Chrome Dev profile.
-2. Enable Developer mode and choose **Load unpacked**.
-3. Select the absolute `extension/` directory in this checkout.
-4. Copy the 32-character extension ID Chrome displays.
-5. Preview the original V1 native-host registration without changing files:
+Keep the working V1 attachment and registration intact. This checkout now
+contains the V2 Chrome semantic-review control plane; do not load its changed
+`extension/` directory into Chrome as if it were the historical V1 attachment.
+Preview the plan using the already-observed extension ID without changing files:
 
    ```sh
    node scripts/install-macos.js --extension-id EXTENSION_ID
    ```
 
-6. Do not run a migration command yet. The original V1 stays attached until the
-   Task 12 human checkpoint shows the exact plan and Tom approves that exact
-   plan.
+The Chrome-review amendment remains preparation-only. Its Task 10 mocked
+integration gate and Task 11 separately approved, human-present inert capability
+probe do not authorize installation. The old Task 12 and live migration remain
+blocked until a later exact migration plan receives separate approval.
 
 The current installer is now migration-oriented. With only `--extension-id`, it
 performs a read-only inspection of committed `HEAD` and the current V1 launcher
@@ -70,17 +70,34 @@ node scripts/install-macos.js \
   --reviewed-install-hash REVIEWED_INSTALL_SHA256
 ```
 
-Do not run that command before the Task 12 checkpoint. The preparation pins the
-complete V1 payload in the project-local version store, installs a separate
+Do not run that command without approval of that exact plan. The preparation pins the
+complete bundle in the project-local version store, installs a separate
 closed trusted-bootstrap graph, creates a stable unpacked-extension directory,
 creates an owner-only Codex review home, seeds a self-consistent active pin,
 recovery state, and installation witness, and preserves the old launcher and
-manifest read-only. Immediately before its first write, the installer rebuilds
+manifest read-only. Review policy, receipt validation, and runtime wiring select
+V2 explicitly; bundle manifests remain the existing format `schemaVersion: 1`.
+The exact frozen control inventory is 49 source files: 38 trusted-bootstrap,
+8 stable-extension, and 3 installer files. The bootstrap also seals its generated
+`package.json` and `runtime-entry.js`. The plan binds the policy, Chrome schema,
+adapter, and one shared digest for the byte-identical Node/browser Chrome
+contracts. Ordinary conversation candidates may include control files only when
+they are identical to active; changing any control family requires a separate
+control-plane migration.
+
+The generated runtime constructs one canonical semantic evidence packet through
+the pinned coordinator and supplies it to Chrome and isolated Codex review. It
+binds the Chrome bridge/journal and records provider-specific provenance;
+unavailable browser version/signing fields and an unobserved component are
+reported honestly, not inferred. Building the plan does not prepare or invoke a
+model, download a component, change browser flags, or contact a local endpoint.
+
+Immediately before its first write, the installer rebuilds
 the plan from clean committed `HEAD`, re-inspects the concrete non-symlink Codex
 executable and current registration, and requires the regenerated install hash
 to equal `REVIEWED_INSTALL_SHA256`. It does **not** change
 the live Chrome Dev native-host registration. An unpacked extension loaded from
-a new path is not assumed to retain its ID: Task 12 must load the stable path,
+a new path is not assumed to retain its ID: a later approved live checkpoint must load the stable path,
 record the ID Chrome Dev actually displays, and stop unless it exactly matches
 the reviewed expected ID. Only a later, separately reviewed registration step
 may point Chrome Dev at the pinned bootstrap. Nothing targets Chrome Stable or

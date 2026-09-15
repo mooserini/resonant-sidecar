@@ -42,6 +42,24 @@ function insertEvent(event) {
   return lines.join('\n');
 }
 
+test('V2 real Codex boundary submits canonical source evidence and keeps isolated process custody', async t => {
+  const files = await sourceFixture(t), v2 = loadReviewPolicy(2);
+  const deterministic = { passed: true, checks: [{ name: 'schema', passed: true }], policySnapshotHash: sha256Json(v2), activeBundleDigest: files.activeManifest.bundleDigest, candidateBundleDigest: files.candidateManifest.bundleDigest };
+  const common = buildSemanticEvidence({ reviewId: 'sealed-v2', activeManifest: files.activeManifest, candidateManifest: files.candidateManifest, policy: v2, deterministic, sourceDiff: await buildSourceDiff(files) });
+  let submitted, finalized;
+  const input = await inputFor(t, { ...common, active: files.activeManifest, candidate: files.candidateManifest, policy: v2, deterministic,
+    runner: fakeCodex({ beforeWrite: async call => { submitted = call; assert.deepEqual(JSON.parse(await readFile(path.join(call.cwd, 'evidence.json'))), common); } }), finalizeResult: async value => { finalized = value; } });
+  delete input.diff;
+  const result = await runCodexReview(input);
+  assert.equal(result.passed, true, JSON.stringify(result));
+  assert.equal(submitted.input, buildCodexReviewPrompt(common));
+  assert.ok(submitted.args.includes('--ignore-user-config') && submitted.args.includes('read-only'));
+  assert.ok(result.verifierIdentities.some(item => item.name === 'codex-process-evidence'));
+  assert.equal(result.policySnapshotHash, sha256Json(v2));
+  assert.deepEqual(result, finalized);
+  await assert.rejects(() => access(submitted.cwd), /ENOENT/);
+});
+
 async function inputFor(t, overrides = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'codex-verifier-test-')));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -81,6 +81,23 @@ async function coordinatorFixture(t, options = {}) {
   };
 }
 
+test('V2 reviewer deterministic input stays identical to frozen common evidence after journal binding', async t => {
+  const f = await chromeCoordinatorFixture(t);
+  const codex = f.deps.codexReview;
+  let received;
+  f.deps.codexReview = input => {
+    received = { deterministic: structuredClone(input.deterministic), common: structuredClone(input.evidence.deterministic) };
+    return codex(input);
+  };
+  f.restart();
+  const work = f.current().startReview();
+  await f.waitChrome(work);
+  f.settle();
+  assert.equal((await work).state, 'eligible');
+  assert.deepEqual(received.deterministic, received.common);
+  assert.equal(received.deterministic.checks.some(check => check.name === 'chrome-binding'), false);
+});
+
 test('coordinator grants eligibility only with one live verifier sample bound to evidence and result', async t => {
   const f = await coordinatorFixture(t);
   const eligible = await f.coordinator.startReview();

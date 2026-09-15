@@ -7,6 +7,8 @@ import { assertBundleManifest } from './bundle-manifest.js';
 import { canonicalJson, sha256Bytes, sha256Json } from './canonical-json.js';
 import { buildCodexReviewPrompt } from './codex-prompt.js';
 import { sanitizeEvidence } from './redaction.js';
+import { assertSupportedReviewPolicy } from './policy-registry.js';
+import { assertSemanticEvidence } from './semantic-evidence.js';
 
 const POLICY = JSON.parse(await readFile(new URL('../policy/review-policy.v1.json', import.meta.url)));
 const SCHEMA = JSON.parse(await readFile(new URL('../policy/codex-attestation.v1.schema.json', import.meta.url)));
@@ -166,18 +168,24 @@ async function trustedPaths(codexPath, codexHome) {
 export async function runCodexReview(input = {}) {
   if (typeof input.finalizeResult !== 'function' || typeof input.sampleVerifier !== 'function') return failure('finalization-required');
   let result = failure('input-invalid');
+  let selectedPolicy = POLICY;
   let temporary; let outputHandle; let inputDirectory; let inputHandle;
   try {
-    requireValue(canonicalJson(input.policy) === canonicalJson(POLICY) && canonicalJson(input.schema) === canonicalJson(SCHEMA));
-    requireValue(typeof input.diff === 'string' && Buffer.byteLength(input.diff) <= MAX_DIFF);
+    selectedPolicy = assertSupportedReviewPolicy(input.policy);
+    requireValue(canonicalJson(input.schema) === canonicalJson(SCHEMA));
+    const v2 = selectedPolicy.schemaVersion === 2;
+    if (!v2) requireValue(typeof input.diff === 'string' && Buffer.byteLength(input.diff) <= MAX_DIFF);
     const active = assertBundleManifest(JSON.parse(canonicalJson(input.active)));
     const candidate = assertBundleManifest(JSON.parse(canonicalJson(input.candidate)));
     requireValue(active.schemaVersion === 1 && candidate.schemaVersion === 1);
-    const deterministic = sanitizeEvidence(input.deterministic, POLICY);
+    const deterministic = sanitizeEvidence(input.deterministic, selectedPolicy);
     requireValue(deterministic.passed === true && Array.isArray(deterministic.checks) && deterministic.checks.length > 0 && deterministic.checks.every(check => check.passed === true));
-    requireValue(deterministic.activeBundleDigest === active.bundleDigest && deterministic.candidateBundleDigest === candidate.bundleDigest && deterministic.policySnapshotHash === sha256Json(POLICY));
-    const evidence = canonicalJson({ active, candidate, diff: input.diff, deterministic });
-    const prompt = buildCodexReviewPrompt({ active, candidate, diff: input.diff, deterministic, policy: POLICY, schema: SCHEMA });
+    requireValue(deterministic.activeBundleDigest === active.bundleDigest && deterministic.candidateBundleDigest === candidate.bundleDigest && deterministic.policySnapshotHash === sha256Json(selectedPolicy));
+    const common = v2 ? assertSemanticEvidence({ evidence: input.evidence, evidenceDigest: input.evidenceDigest }) : null;
+    if (v2) requireValue(canonicalJson(common.evidence.activeManifest) === canonicalJson(active) && canonicalJson(common.evidence.candidateManifest) === canonicalJson(candidate)
+      && canonicalJson(common.evidence.deterministic) === canonicalJson(deterministic) && canonicalJson(common.evidence.policy) === canonicalJson(selectedPolicy));
+    const evidence = canonicalJson(common ?? { active, candidate, diff: input.diff, deterministic });
+    const prompt = buildCodexReviewPrompt(common ?? { active, candidate, diff: input.diff, deterministic, policy: selectedPolicy, schema: SCHEMA });
     requireValue(Buffer.byteLength(evidence) <= MAX_INPUT && Buffer.byteLength(prompt) <= MAX_INPUT);
     const executableDigest = await trustedPaths(input.codexPath, input.trustedCodexHome);
     temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sidecar-codex-review-')));
@@ -245,12 +253,12 @@ export async function runCodexReview(input = {}) {
     const attestation = parseJson(UTF8.decode(bytes.subarray(0, bytesRead)));
     validate(attestation, SCHEMA);
     requireValue(canonicalJson(parseJson(finalMessage)) === canonicalJson(attestation));
-    const sanitized = sanitizeEvidence(attestation, POLICY);
+    const sanitized = sanitizeEvidence(attestation, selectedPolicy);
     result = { passed: sanitized.verdict === 'favorable', reasonCode: sanitized.verdict === 'favorable' ? 'codex-favorable' : 'codex-unfavorable',
       attestation: sanitized, outputDigest: sha256Json(sanitized), verifierIdentities: identities,
-      activeBundleDigest: active.bundleDigest, candidateBundleDigest: candidate.bundleDigest, policySnapshotHash: sha256Json(POLICY) };
+      activeBundleDigest: active.bundleDigest, candidateBundleDigest: candidate.bundleDigest, policySnapshotHash: sha256Json(selectedPolicy) };
   } catch { /* Only fixed reason codes and hashes cross the custody boundary. */ }
-  try { result = sanitizeEvidence(result, POLICY); await input.finalizeResult(structuredClone(result)); }
+  try { result = sanitizeEvidence(result, selectedPolicy); await input.finalizeResult(structuredClone(result)); }
   catch { result = failure('finalization-failed'); }
   finally {
     try {

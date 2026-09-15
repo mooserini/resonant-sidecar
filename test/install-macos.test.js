@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -10,11 +11,95 @@ import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json
 import { VersionStore } from '../bootstrap/version-store.js';
 import { buildInstallPlan, inspectExecutable, migrateInstallation, parseInstallerArgs } from '../scripts/install-macos.js';
 import { inspectCurrentInstallation, verifyInstallPlan, verifyStoredMigrationChain } from '../scripts/verify-install-plan.js';
+import { loadReviewPolicy } from '../review/policy-registry.js';
 
 const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const COMMIT = 'b'.repeat(40);
 const execFileAsync = promisify(execFile);
 const codexIdentity = executable => ({ path: executable, bytes: 7, sha256: '9'.repeat(64), mode: 0o700 });
+
+test('V2 install plan seals exact control identities and omits declaration-only semantic input', () => {
+  const plan = fixturePlan('/tmp/v2-dry-run');
+  assert.equal(plan.reviewPolicyVersion, 2);
+  assert.equal(plan.controlPlane.files.length, 49);
+  assert.equal(plan.trustedBootstrap.files.length, 40);
+  assert.equal(plan.stableExtension.files.length, 8);
+  const contract = plan.trustedBootstrap.files.find(file => file.path === 'review/chrome-review-contract.js');
+  assert.equal(contract.sha256, plan.stableExtension.files.find(file => file.path === 'chrome-review-contract.js').sha256);
+  assert.equal(contract.sha256, plan.controlPlane.contractDigest);
+  assert.doesNotMatch(plan.runtimeEntry.contents, /Committed local bundle; canonical manifests and deterministic checks are authoritative/);
+  assert.match(plan.runtimeEntry.contents, /loadReviewPolicy\(2\)/);
+  assert.match(plan.runtimeEntry.contents, /chromeContext/);
+  assert.match(plan.runtimeEntry.contents, /chromeReviewJournal/);
+});
+
+test('V2 stored plan verifier rejects omitted inventory and inconsistent shared contract before approval hash', () => {
+  const original = fixturePlan('/tmp/v2-dry-run');
+  for (const mutate of [
+    plan => plan.trustedBootstrap.files.splice(0, 1),
+    plan => plan.stableExtension.files.splice(0, 1),
+    plan => { plan.trustedBootstrap.digest = 'f'.repeat(64); },
+    plan => { plan.controlPlane.contractDigest = 'f'.repeat(64); },
+    plan => { plan.stableExtension.files.find(file => file.path === 'chrome-review-contract.js').sha256 = 'f'.repeat(64); },
+  ]) {
+    const plan = structuredClone(original); mutate(plan);
+    assert.throws(() => verifyInstallPlan(plan), /inventory|control|digest|graph/);
+  }
+});
+
+test('generated V2 runtime executes pinned coordinator wiring with V2 receipts and current adapter custody', async t => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sidecar-entry-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'project/runtime'), { recursive: true, mode: 0o700 });
+  const plan = fixturePlan(root), inspection = sourceInspection();
+  const probe = async (entry, repository, stableRoot, sources) => {
+    const assert = (await import('node:assert/strict')).default;
+    const { SourceTextModule, SyntheticModule } = await import('node:vm');
+    const fs = await import('node:fs');
+    const { ReviewCoordinator } = await import(`${repository}/review/review-coordinator.js`);
+    let deps, receiptPolicy, bootstrap, drift = false;
+    const chromePath = '/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev';
+    const body = file => file === chromePath ? Buffer.from('observed-browser') : Buffer.from(sources[file]);
+    const journal = { recover: async () => 'empty', snapshot: () => 'journal-snapshot', finish: async (...args) => args, markReceipted: async hash => hash };
+    const controller = { closed: Promise.resolve(), chromeReviewJournal: journal, chromeReviewIdentity: { activeDigest: 'a'.repeat(64), runtimeGeneration: 1, channelId: 'channel', restartId: 'restart' },
+      requestChromeReview: async request => request, mintChromeInvocation: () => 'minted', chromeReviewStatus: binding => binding, completeChromeReview: binding => binding };
+    const module = new SourceTextModule(entry, { initializeImportMeta: meta => { meta.url = 'file:///sealed/runtime-entry.js'; } });
+    await module.link(async specifier => {
+      let exports;
+      if (specifier === 'node:fs') exports = { constants: fs.constants, openSync: (file, flags) => { assert.equal(flags & fs.constants.O_WRONLY, 0); body(file); return file; },
+        fstatSync: file => ({ isFile: () => true, nlink: 1, mode: 0o400, size: body(file).length }), readFileSync: file => drift && file.endsWith('chrome-review-adapter.js') ? Buffer.from('changed') : body(file), closeSync() {} };
+      else if (specifier === 'node:child_process') exports = { execFileSync: () => assert.fail('No process starts during runtime construction') };
+      else if (specifier === './bootstrap/host.js') exports = { runBootstrap: async input => { bootstrap = input; return controller; } };
+      else if (specifier === './review/review-coordinator.js') exports = { ReviewCoordinator: class extends ReviewCoordinator { constructor(input) { super(input); deps = input; } } };
+      else if (specifier === './review/receipt-store.js') {
+        const { ReceiptStore } = await import(`${repository}/review/receipt-store.js`);
+        exports = { ReceiptStore: class extends ReceiptStore { constructor(input) { super(input); receiptPolicy = input.policy; } } };
+      } else if (specifier.endsWith('.json')) exports = { default: JSON.parse(fs.readFileSync(new URL(specifier, `${repository}/`), 'utf8')) };
+      else exports = await import(specifier.startsWith('.') ? new URL(specifier, `${repository}/`).href : specifier);
+      return new SyntheticModule(Object.keys(exports), function () { for (const key of Object.keys(exports)) this.setExport(key, exports[key]); });
+    });
+    await module.evaluate();
+    assert.equal(receiptPolicy?.schemaVersion, 2, 'Generated receipt store must select V2');
+    assert.equal(deps.policy.schemaVersion, 2);
+    assert.ok(bootstrap.coordinator instanceof ReviewCoordinator);
+    assert.equal(deps.codexInput.diff, undefined);
+    assert.equal(deps.codexReview, (await import(`${repository}/review/codex-verifier.js`)).runCodexReview);
+    assert.equal(bootstrap.chromeReview.projectRoot, bootstrap.workspace);
+    assert.equal(deps.deterministicInput.trustedHarness.stableExtension.root, stableRoot);
+    assert.equal(deps.chromeJournal.snapshot(), 'journal-snapshot');
+    assert.equal(await deps.chromeJournal.markReceipted('bound-hash'), 'bound-hash');
+    assert.equal(deps.mintChromeInvocation(), 'minted');
+    assert.equal(deps.chromeContext().adapterDigest, (await import(`${repository}/review/canonical-json.js`)).sha256Bytes(body(`${stableRoot}/chrome-review-adapter.js`)));
+    assert.equal(deps.chromeContext().componentObservation.status, 'not-collected');
+    assert.deepEqual(deps.chromeContext().browserObservation, bootstrap.chromeReview.browserObservation);
+    drift = true;
+    assert.throws(() => deps.chromeContext(), /Pinned control/);
+  };
+  const repository = new URL('../', import.meta.url).href.replace(/\/$/, '');
+  const sources = Object.fromEntries(inspection.stableExtension.files.map(file => [path.join(plan.paths.stableExtension, file.relativePath.slice(10)), file.bytes.toString('utf8')]));
+  sources['/sealed/review/chrome-review-contract.js'] = inspection.trustedBootstrap.files.find(file => file.relativePath === 'review/chrome-review-contract.js').bytes.toString('utf8');
+  await execFileAsync(process.execPath, ['--experimental-vm-modules', '--input-type=module', '-e', `await (${probe.toString()})(${JSON.stringify(plan.runtimeEntry.contents)},${JSON.stringify(repository)},${JSON.stringify(plan.paths.stableExtension)},${JSON.stringify(sources)});`]);
+});
 
 function currentIdentity(launcherPath, manifestPath, launcher = 'old', manifest = 'old-manifest') {
   const value = {
@@ -30,21 +115,17 @@ function sourceArtifact(relativePath, text, mode = 0o644) {
 }
 
 function sourceInspection() {
-  const bundleFiles = [
-    sourceArtifact('extension/manifest.json', JSON.stringify({ manifest_version: 3, permissions: ['nativeMessaging', 'sidePanel', 'storage'] })),
-    sourceArtifact('native-host/host.js', '// active host\n'),
-    sourceArtifact('package.json', JSON.stringify({ type: 'module', engines: { node: '>=22' } })),
-  ];
-  const trustedFiles = [
-    sourceArtifact('bootstrap/host.js', '// trusted host\n'),
-    sourceArtifact('bootstrap/native-proxy.js', '// trusted proxy\n'),
-    sourceArtifact('native-host/native-framing.js', '// framing\n'),
-  ];
+  const policy = loadReviewPolicy(2);
+  const artifact = file => sourceArtifact(file, readFileSync(new URL(`../${file}`, import.meta.url)));
+  const bundleFiles = policy.approvedBundlePaths.map(artifact);
+  const trustedFiles = policy.trustedControlPaths.filter(file => !file.startsWith('extension/') && !file.startsWith('scripts/')).map(artifact);
+  const extensionFiles = policy.trustedControlPaths.filter(file => file.startsWith('extension/')).map(artifact);
+  const controlFiles = policy.trustedControlPaths.map(file => { const item = artifact(file); return { path: file, bytes: item.bytes.length, mode: item.mode, sha256: item.sha256 }; });
   const manifest = {
     schemaVersion: 1,
     sourceCommit: COMMIT,
     files: bundleFiles.map(({ relativePath, bytes, mode, sha256 }) => ({ path: relativePath, bytes: bytes.length, mode, sha256 })),
-    capabilities: { chromePermissions: ['nativeMessaging', 'sidePanel', 'storage'], hostPermissions: [], lifecycleScripts: [], listeners: [] },
+    capabilities: { chromePermissions: ['nativeMessaging', 'sidePanel', 'storage'], hostPermissions: [], lifecycleScripts: ['test'], listeners: [] },
     dependencies: { lockfiles: [], packageManager: null, runtime: [] },
   };
   manifest.bundleDigest = sha256Json(manifest);
@@ -52,6 +133,9 @@ function sourceInspection() {
     sourceCommit: COMMIT,
     bundle: { manifest, files: bundleFiles },
     trustedBootstrap: { digest: sha256Json(trustedFiles.map(({ relativePath, sha256, mode }) => ({ path: relativePath, sha256, mode }))), files: trustedFiles },
+    stableExtension: { files: extensionFiles },
+    controlPlane: { files: controlFiles, digest: sha256Json(controlFiles), policyDigest: sha256Json(policy), schemaDigest: sha256Json(JSON.parse(readFileSync(new URL('../policy/chrome-language-model.v2.schema.json', import.meta.url)))),
+      adapterDigest: artifact('extension/chrome-review-adapter.js').sha256, contractDigest: artifact('review/chrome-review-contract.js').sha256 },
     declarationComparison: { passed: true, checks: [{ name: 'v1-capabilities', passed: true }] },
   };
 }

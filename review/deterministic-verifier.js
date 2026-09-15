@@ -8,6 +8,7 @@ import { assertBundleManifest, buildBundleManifest } from './bundle-manifest.js'
 import { canonicalJson, sha256Bytes, sha256Json } from './canonical-json.js';
 import { compareCapabilities } from './capability-diff.js';
 import { sanitizeEvidence } from './redaction.js';
+import { assertSupportedReviewPolicy } from './policy-registry.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const PINNED_POLICY = JSON.parse(await readFile(new URL('../policy/review-policy.v1.json', import.meta.url)));
@@ -21,7 +22,7 @@ function failure(name, reasonCode) { return { name, passed: false, reasonCode };
 
 async function sealedSnapshot(staged, policy) {
   const manifest = assertBundleManifest(staged.manifest);
-  if (manifest.schemaVersion !== policy.schemaVersion) throw new Error('schema');
+  if (manifest.schemaVersion !== 1) throw new Error('schema');
   const expected = [...policy.approvedBundlePaths].sort();
   if (canonicalJson(manifest.files.map(file => file.path)) !== canonicalJson(expected)) throw new Error('inventory');
   const found = [];
@@ -108,8 +109,8 @@ export async function runDeterministicReview({ staged, active, policy, trustedHa
   };
   let activeManifest;
   try {
-    if (canonicalJson(policy) !== canonicalJson(PINNED_POLICY) || path.resolve(trustedHarness.root) !== path.resolve(ROOT)) throw new Error('policy');
-    resultPolicy = policy;
+    resultPolicy = assertSupportedReviewPolicy(policy);
+    if (path.resolve(trustedHarness.root) !== path.resolve(ROOT)) throw new Error('policy');
   } catch { checks.push(failure('schema', 'policy-invalid')); return finish(); }
   let sources;
   let activeSources;
@@ -118,13 +119,47 @@ export async function runDeterministicReview({ staged, active, policy, trustedHa
     sources = await sealedSnapshot(staged, policy);
     const activeRoot = active.root ?? ROOT;
     const rebuiltActive = await buildBundleManifest({ root: activeRoot, files: activeManifest.files.map(file => file.path), sourceCommit: activeManifest.sourceCommit, schemaVersion: activeManifest.schemaVersion });
+    if (policy.schemaVersion === 2) {
+      rebuiltActive.files = rebuiltActive.files.map(file => {
+        const original = activeManifest.files.find(item => item.path === file.path);
+        if (file.mode !== original.mode && file.mode !== 0o400) throw new Error('active-mode');
+        return { ...file, mode: original.mode };
+      });
+      const { bundleDigest, ...unsigned } = rebuiltActive;
+      rebuiltActive.bundleDigest = sha256Json(unsigned);
+    }
     if (rebuiltActive.bundleDigest !== activeManifest.bundleDigest) throw new Error('active');
-    activeSources = Object.fromEntries(await Promise.all(activeManifest.files.map(async file => [file.path, await readFile(path.join(activeRoot, file.path), 'utf8')])));
+    activeSources = Object.fromEntries(await Promise.all(activeManifest.files.map(async file => {
+      const bytes = await readFile(path.join(activeRoot, file.path));
+      if (bytes.length !== file.bytes || sha256Bytes(bytes) !== file.sha256) throw new Error('active');
+      return [file.path, UTF8.decode(bytes)];
+    })));
     checks.push({ name: 'schema', passed: true }, { name: 'staged-integrity', passed: true });
   } catch { checks.push(failure('staged-integrity', 'staged-integrity-failed')); return finish(); }
   const delta = compareCapabilities({ active: { manifest: activeManifest, sources: activeSources }, candidate: { manifest: staged.manifest, sources }, policy });
   checks.push(...delta.checks);
   if (!delta.passed) return finish();
+  const trustedSources = {};
+  if (policy.schemaVersion === 2) {
+    try {
+      const stable = trustedHarness.stableExtension;
+      const expected = policy.trustedControlPaths.filter(file => file.startsWith('extension/')).map(file => file.slice(10));
+      if (!stable || canonicalJson(stable.files.map(file => file.path)) !== canonicalJson(expected) || await realpath(stable.root) !== stable.root) throw new Error('controls');
+      for (const file of stable.files) {
+        const handle = await open(path.join(stable.root, file.path), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const info = await handle.stat();
+          if (!info.isFile() || info.nlink !== 1 || info.size > MAX_INPUT_BYTES || ![0o400, 0o644].includes(info.mode & 0o7777)) throw new Error('controls');
+          const bytes = await handle.readFile();
+          if (bytes.length !== info.size || sha256Bytes(bytes) !== file.sha256) throw new Error('controls');
+          const name = `extension/${file.path}`;
+          if (Object.hasOwn(sources, name) && (sources[name] !== UTF8.decode(bytes) || activeSources[name] !== UTF8.decode(bytes))) throw new Error('controls');
+          trustedSources[name] = UTF8.decode(bytes);
+        } finally { await handle.close(); }
+      }
+      if (trustedSources['extension/chrome-review-contract.js'] !== await readFile(new URL('./chrome-review-contract.js', import.meta.url), 'utf8')) throw new Error('contracts');
+    } catch { checks.push(failure('capabilities', 'control-plane-migration-required')); return finish(); }
+  }
   try {
     if (process.platform !== 'darwin') throw new Error('sandbox-unavailable');
     const executable = await realpath(process.execPath);
@@ -142,8 +177,8 @@ export async function runDeterministicReview({ staged, active, policy, trustedHa
       sources = await sealedSnapshot(staged, policy);
       const syntax = command[1] === '--check';
       const name = syntax ? `syntax-${policy.approvedBundlePaths.indexOf(command[2])}` : command.at(-1);
-      const args = syntax ? ['--check', '--input-type=module'] : ['--experimental-vm-modules', HARNESS, name];
-      const input = syntax ? sources[command[2]] : JSON.stringify(sources);
+      const args = syntax ? ['--check', '--input-type=module'] : ['--experimental-vm-modules', HARNESS, name, ...(policy.schemaVersion === 2 ? ['--policy-version=2'] : [])];
+      const input = syntax ? sources[command[2]] : JSON.stringify(policy.schemaVersion === 2 ? { sources, trustedSources } : sources);
       let output;
       try {
         output = await runner({ command: '/usr/bin/sandbox-exec', args: ['-p', profile, executable, ...args], input, cwd: ROOT, env: { LANG: 'C', LC_ALL: 'C' }, shell: false, timeoutMs: TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES });
