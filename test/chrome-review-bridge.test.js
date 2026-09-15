@@ -6,6 +6,8 @@ import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
 import { ChromeReviewBridge, parseChromeSettlement } from '../review/chrome-review-bridge.js';
 import { bridgeFixture, observations, RAW, NOW, OTHER, until, wireBinding } from './fixtures/chrome-bridge.js';
 import { buildChromeReviewRequest } from '../review/semantic-evidence.js';
+import { BoundedDecoder } from '../bootstrap/native-proxy.js';
+import { encodeNativeMessage } from '../native-host/native-framing.js';
 
 async function fixture(t, options = {}) {
   const f = await bridgeFixture(t); const journal = new ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: f.binding.restartId }); await journal.recover();
@@ -30,6 +32,25 @@ test('one issued invocation journals before emission and revalidates raw output 
   assert.equal(result.availabilityStatus, 'available'); assert.equal(result.executionStatus, 'completed');
   assert.equal(f.journal.recoveryState(), 'terminal-unreceipted'); assert.equal(f.journal.snapshot().reasonCode, 'completed');
   assert.equal(f.bridge.handleSettlement(f.result()), false); await assert.rejects(f.start());
+});
+
+test('malformed native UTF-8 cannot become a repaired ChromeReviewResult through decoder, bridge and durable journal', async t => {
+  const f = await fixture(t); const pending = f.start(); await until(() => f.messages.length === 1);
+  const valid = encodeNativeMessage(f.result()); const corrupted = Buffer.from(valid);
+  const summaryStart = corrupted.indexOf(Buffer.from('No blocking concern.')); assert.ok(summaryStart > 4);
+  corrupted[summaryStart] = 0xff;
+  let dispatched = 0; let failure;
+  const decoder = new BoundedDecoder(message => { dispatched++; f.bridge.handleSettlement(message); });
+  try { decoder.push(Buffer.concat([corrupted, valid])); } catch (error) { failure = error; }
+  // Mirrors bootstrap's framing-error path: channel loss closes the pending
+  // bridge; a malformed frame must never reach its settlement callback.
+  if (failure) await f.bridge.close('connection-loss');
+  const result = await pending;
+  assert.ok(failure instanceof TypeError, 'malformed UTF-8 must fail at the byte boundary');
+  assert.equal(dispatched, 0); assert.equal(result.type, 'ChromeReviewFailure'); assert.equal(result.reasonCode, 'connection-loss');
+  assert.equal(Object.hasOwn(result, 'analysis'), false);
+  assert.equal(f.journal.recoveryState(), 'terminal-unreceipted'); assert.equal(f.journal.snapshot().reasonCode, 'connection-loss');
+  assert.equal(f.bridge.handleSettlement(f.result()), false);
 });
 for (const field of ['reviewId', 'candidateDigest', 'activeDigest', 'policyDigest', 'invocationId', 'runtimeGeneration', 'inputDigest', 'evidenceDigest', 'promptDigest', 'schemaDigest', 'adapterDigest', 'deadline', 'channelId', 'restartId']) test(`cross-${field} cannot settle the issued invocation`, async t => {
   const f = await fixture(t); const pending = f.start(); await until(() => f.messages.length);

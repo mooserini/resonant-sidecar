@@ -8,6 +8,8 @@ export const QUEUE_LIMIT = 2 * FRAME_LIMIT;
 
 export class BoundedDecoder {
   #buffer = Buffer.alloc(0); #receive;
+  // Preserve the exact frame text: never repair invalid bytes or strip a BOM.
+  #utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   constructor(receive) { this.#receive = receive; }
   push(chunk) {
     if (this.#buffer.length + chunk.length > QUEUE_LIMIT) throw new Error('Frame buffer exceeded');
@@ -16,7 +18,7 @@ export class BoundedDecoder {
       const length = this.#buffer.readUInt32LE(0);
       if (!length || length > FRAME_LIMIT) throw new Error('Frame size exceeded');
       if (this.#buffer.length < length + 4) return;
-      const message = JSON.parse(this.#buffer.subarray(4, length + 4).toString('utf8'));
+      const message = JSON.parse(this.#utf8.decode(this.#buffer.subarray(4, length + 4)));
       this.#buffer = this.#buffer.subarray(length + 4);
       this.#receive(message);
     }
