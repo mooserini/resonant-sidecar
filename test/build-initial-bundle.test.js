@@ -60,6 +60,8 @@ for (const [name, source, pattern] of [
   ['fake node builtin', "import value from 'node:definitely-not-a-real-builtin';\n", /builtin|ambient|import graph/i],
   ['comment-separated static import', "import/* gap */ value from 'ambient-package';\n", /ambient|import graph/i],
   ['comment-separated dynamic import', "await import /* gap */ ('ambient-package');\n", /ambient|import graph/i],
+  ['template-composed relative dynamic import', "await import(`${'./native-proxy.js'}`);\n", /non-literal|import graph/i],
+  ['template-composed node dynamic import', "await import(`${'node:fs'}`);\n", /non-literal|import graph/i],
   ['dynamic import inside a template interpolation', "const load = `${await import('ambient-package')}`;\n", /ambient|import graph/i],
   ['non-literal dynamic import', "const target = './host.js'; await import(target);\n", /non-literal|import graph/i],
   ['unlisted relative dynamic import', "await import('./not-pinned.js');\n", /escapes|import graph/i],
@@ -70,7 +72,7 @@ for (const [name, source, pattern] of [
 
 test('trusted closure allows only explicit node builtins and pinned literal relatives', async () => {
   const files = repositoryFiles();
-  files['bootstrap/host.js'] = "import { readFile } from 'node:fs/promises';\nexport { default as proxy } from './native-proxy.js';\nawait import('../review/canonical-json.js');\nvoid readFile;\n";
+  files['bootstrap/host.js'] = "import { readFile } from 'node:fs/promises';\nexport { default as proxy } from './native-proxy.js';\nawait import('../review/canonical-json.js');\nawait import('node:test');\nvoid readFile;\n";
   assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);
 });
 
@@ -81,9 +83,10 @@ test('trusted closure ignores import-shaped text in comments and string literals
     "const message = \"Unapproved candidate import'); then await load('ambient-string-package\";",
     "const pattern = /import\\('ambient-regex-package'\\)/;",
     "const template = `import('ambient-template-text')`;",
+    "const interpolation = `safe:${'value'}`;",
     "import { readFile } from 'node:fs/promises';",
     "export function encode(value) { return Buffer.from(value, 'utf8'); }",
-    'void message; void pattern; void template; void readFile; void encode;',
+    'void message; void pattern; void template; void interpolation; void readFile; void encode;',
     '',
   ].join('\n');
   assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);

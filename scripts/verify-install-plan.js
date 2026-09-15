@@ -147,17 +147,37 @@ export function verifyInstallPlan(plan) {
   return plan;
 }
 
-async function readStoredReceiptFile(file) {
+function storedFileIdentity(metadata) {
+  return { dev: metadata.dev, ino: metadata.ino, size: metadata.size, mode: metadata.mode & 0o777, uid: metadata.uid, nlink: metadata.nlink };
+}
+
+function assertStoredFileCustody(metadata, ownerUid) {
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > MAX_FILE || (metadata.mode & 0o777) !== 0o400 || metadata.uid !== ownerUid) fail('stored migration receipt owner or file custody');
+}
+
+function assertStoredRootCustody(metadata, ownerUid) {
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o700 || metadata.uid !== ownerUid) fail('stored migration receipt root owner or custody');
+}
+
+function sameStoredIdentity(metadata, expected) {
+  return canonicalJson(storedFileIdentity(metadata)) === canonicalJson(expected);
+}
+
+async function readStoredReceiptFile(file, expected, ownerUid) {
   const metadata = await lstat(file);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > MAX_FILE || (metadata.mode & 0o777) !== 0o400) fail('stored migration receipt custody');
+  assertStoredFileCustody(metadata, ownerUid);
+  if (!sameStoredIdentity(metadata, expected)) fail('stored migration receipt changed');
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const held = await handle.stat();
-    if (held.dev !== metadata.dev || held.ino !== metadata.ino || held.size !== metadata.size) fail('stored migration receipt changed');
+    assertStoredFileCustody(held, ownerUid);
+    if (!sameStoredIdentity(held, expected)) fail('stored migration receipt changed');
     const bytes = await handle.readFile();
     const after = await handle.stat();
     const current = await lstat(file);
-    if (after.dev !== metadata.dev || after.ino !== metadata.ino || after.size !== metadata.size || current.dev !== metadata.dev || current.ino !== metadata.ino || current.size !== metadata.size || bytes.length !== metadata.size) fail('stored migration receipt changed');
+    assertStoredFileCustody(after, ownerUid);
+    assertStoredFileCustody(current, ownerUid);
+    if (!sameStoredIdentity(after, expected) || !sameStoredIdentity(current, expected) || bytes.length !== expected.size) fail('stored migration receipt changed');
     return bytes;
   } finally { await handle.close(); }
 }
@@ -172,24 +192,35 @@ function decodeCanonicalReceipt(bytes) {
   return value;
 }
 
-export async function verifyStoredMigrationChain(plan) {
+export async function verifyStoredMigrationChain(plan, { afterInitialInventory } = {}) {
   verifyInstallPlan(plan);
+  if (afterInitialInventory !== undefined && typeof afterInitialInventory !== 'function') fail('stored migration verification hook');
+  const ownerUid = process.getuid();
   const root = plan.paths.migrationReceipts;
   absolute(root, 'stored migration receipt root');
   const metadata = await lstat(root);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o700) fail('stored migration receipt root custody');
+  assertStoredRootCustody(metadata, ownerUid);
+  const rootIdentity = storedFileIdentity(metadata);
   const directory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     const held = await directory.stat();
-    if (held.dev !== metadata.dev || held.ino !== metadata.ino) fail('stored migration receipt root changed');
+    assertStoredRootCustody(held, ownerUid);
+    if (!sameStoredIdentity(held, rootIdentity)) fail('stored migration receipt root changed');
     const expectedNames = ['after.json', 'after.sha256', 'before.json', 'before.sha256', 'migration.json', 'migration.sha256'];
     const entries = await readdir(root, { withFileTypes: true });
     const observedNames = entries.map(entry => entry.name).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
     if (canonicalJson(observedNames) !== canonicalJson(expectedNames) || entries.some(entry => !entry.isFile())) fail('stored migration receipt entries');
+    const initialInventory = new Map();
+    for (const name of expectedNames) {
+      const item = await lstat(path.join(root, name));
+      assertStoredFileCustody(item, ownerUid);
+      initialInventory.set(name, storedFileIdentity(item));
+    }
+    if (afterInitialInventory) await afterInitialInventory();
     let previousReceiptHash = null;
     for (const [name, eventType] of [['before', 'migration-before'], ['migration', 'migration-prepared'], ['after', 'migration-files-prepared']]) {
-      const body = await readStoredReceiptFile(path.join(root, `${name}.json`));
-      const sidecar = await readStoredReceiptFile(path.join(root, `${name}.sha256`));
+      const body = await readStoredReceiptFile(path.join(root, `${name}.json`), initialInventory.get(`${name}.json`), ownerUid);
+      const sidecar = await readStoredReceiptFile(path.join(root, `${name}.sha256`), initialInventory.get(`${name}.sha256`), ownerUid);
       if (!sidecar.equals(Buffer.from(`${sha256Bytes(body)}\n`, 'utf8'))) fail('stored migration receipt sidecar');
       const receipt = decodeCanonicalReceipt(body);
       const unsigned = { ...receipt }; delete unsigned.receiptHash;
@@ -197,9 +228,17 @@ export async function verifyStoredMigrationChain(plan) {
       if (canonicalJson(receipt) !== canonicalJson(plan.receipts[name])) fail('stored migration receipt plan binding');
       previousReceiptHash = receipt.receiptHash;
     }
-    const after = await directory.stat();
-    const current = await lstat(root);
-    if (after.dev !== metadata.dev || after.ino !== metadata.ino || current.dev !== metadata.dev || current.ino !== metadata.ino || !current.isDirectory() || current.isSymbolicLink()) fail('stored migration receipt root changed');
+    const finalEntries = await readdir(root, { withFileTypes: true });
+    const finalNames = finalEntries.map(entry => entry.name).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+    if (canonicalJson(finalNames) !== canonicalJson(expectedNames) || finalEntries.some(entry => !entry.isFile())) fail('stored migration receipt entries changed');
+    for (const name of expectedNames) {
+      const item = await lstat(path.join(root, name));
+      assertStoredFileCustody(item, ownerUid);
+      if (!sameStoredIdentity(item, initialInventory.get(name))) fail('stored migration receipt inventory changed');
+    }
+    const after = await directory.stat(); const current = await lstat(root);
+    assertStoredRootCustody(after, ownerUid); assertStoredRootCustody(current, ownerUid);
+    if (!sameStoredIdentity(after, rootIdentity) || !sameStoredIdentity(current, rootIdentity)) fail('stored migration receipt root changed');
     return Object.freeze({ installHash: plan.installHash, receiptRoot: root, finalReceiptHash: previousReceiptHash });
   } finally { await directory.close(); }
 }

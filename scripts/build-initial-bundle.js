@@ -198,7 +198,12 @@ function moduleTokens(source, name) {
       }
       if (character === '/' && canStartRegex()) { index = regexLiteral(index); continue; }
       if (character === "'" || character === '"') { index = stringToken(index, character); continue; }
-      if (character === '`') { index = templateLiteral(index); continue; }
+      if (character === '`') {
+        tokens.push({ type: 'template-boundary', value: 'start', start: index });
+        index = templateLiteral(index);
+        tokens.push({ type: 'template-boundary', value: 'end', start: index - 1 });
+        continue;
+      }
       if (identifierStart(character)) {
         const begin = index++;
         while (identifierPart(source[index])) index += 1;

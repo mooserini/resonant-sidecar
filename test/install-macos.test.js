@@ -274,6 +274,36 @@ test('stored migration chain verifier rejects custody and chain substitution', a
   });
 });
 
+test('stored migration chain verifier catches mutations after its initial inventory snapshot', async t => {
+  const cases = [
+    ['add', async plan => writeFile(path.join(plan.paths.migrationReceipts, 'late-extra'), 'late', { mode: 0o400 })],
+    ['chmod', async plan => chmod(path.join(plan.paths.migrationReceipts, 'before.json'), 0o600)],
+    ['hardlink', async plan => {
+      const target = path.join(plan.paths.migrationReceipts, 'after.json'); await unlink(target); await link(path.join(plan.paths.migrationReceipts, 'before.json'), target);
+    }],
+    ['remove', async plan => unlink(path.join(plan.paths.migrationReceipts, 'after.sha256'))],
+    ['swap', async plan => {
+      const target = path.join(plan.paths.migrationReceipts, 'before.json'); const bytes = await readFile(target); await unlink(target); await writeFile(target, bytes, { mode: 0o400 });
+    }],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, async subtest => {
+    const { plan } = await storedFixture(subtest);
+    const ready = Promise.withResolvers(); const release = Promise.withResolvers();
+    const verification = verifyStoredMigrationChain(plan, { afterInitialInventory: async () => { ready.resolve(); await release.promise; } });
+    await ready.promise;
+    try { await mutate(plan); } finally { release.resolve(); }
+    await assert.rejects(verification, /stored migration|receipt|custody|changed|entries/i);
+  });
+});
+
+test('stored migration chain verifier requires current-user ownership', async t => {
+  const { plan } = await storedFixture(t);
+  const getuid = process.getuid;
+  process.getuid = () => getuid() + 1;
+  try { await assert.rejects(() => verifyStoredMigrationChain(plan), /owner|custody/i); }
+  finally { process.getuid = getuid; }
+});
+
 test('plan verifier rejects unproved registration and redirected artifact destinations', () => {
   const launcherPath = '/Users/example/Library/Application Support/Resonant Sidecar/native-host';
   const manifestPath = '/Users/example/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json';

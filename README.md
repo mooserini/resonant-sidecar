@@ -100,9 +100,10 @@ node scripts/verify-install-plan.js --stored-chain /tmp/resonant-sidecar-migrati
 ```
 
 This command is read-only. It verifies the fixed receipt inventory, canonical
-bytes, sidecars, modes, file custody, predecessor chain, and exact install-plan
-binding. Any failure is a hard stop; keep the reviewed plan and
-`runtime/migration-receipts/CURRENT_HASH/` for collaborative diagnosis.
+bytes, sidecars, modes, current-user ownership, file custody, predecessor chain,
+and exact install-plan binding, then repeats the complete inventory and identity
+snapshot at its final boundary. Any failure is a hard stop; keep the reviewed
+plan and `runtime/migration-receipts/CURRENT_HASH/` for collaborative diagnosis.
 
 See [docs/migration-runbook.md](docs/migration-runbook.md) for the exact human
 boundary, recovery procedure, process tree, and receipt locations.
