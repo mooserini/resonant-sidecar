@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
-import { chmod, cp, link, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, cp, link, lstat, mkdir, readFile, readdir, readlink, rename, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import childProcess, { spawnSync } from 'node:child_process';
@@ -413,6 +413,15 @@ test('receipt verifier default names an intact fixture-derived mixed V1/V2 tail'
   assert.match(receipt.tailHash, /^[a-f0-9]{64}$/); assert.ok(receipt.count > 2);
 });
 
+test('receipt verifier default tail is reproducible across independent disposable roots', () => {
+  const results = Array.from({ length: 2 }, () => spawnVerifier(process.execPath, ['scripts/verify-receipt-chain.js'], { cwd: ROOT, encoding: 'utf8' }));
+  for (const result of results) assert.equal(result.status, 0, result.stderr);
+  const receipts = results.map(result => JSON.parse(result.stdout));
+  assert.equal(receipts[0].source, 'disposable-mixed-fixture');
+  assert.equal(receipts[0].state, 'intact');
+  assert.deepEqual(receipts[0], receipts[1], 'fixed fixture inputs include receipt identities, not just event data and timestamps');
+});
+
 test('receipt verifier supplied-root mode detects tampering without modifying the supplied tree', async t => {
   const f = await harness(t); f.start(); await f.waitReady(); await f.session.runChromeReview(); await f.work();
   await invariants(f, { success: true });
@@ -440,4 +449,96 @@ test('receipt verifier cannot normalize a supplied hardlink custody violation in
   assert.equal(JSON.parse(result.stdout).state, 'custody-broken');
   assert.deepEqual(await hashes(f.receiptsRoot), before);
   assert.deepEqual(await readFile(path.join(f.root, 'active/pin.json')), f.pin); assert.equal(f.issued.length, 2);
+});
+
+async function verifierRepository(t) {
+  const fixture = await runtimeFixture(t), repository = path.join(fixture.projectRoot, 'repository');
+  for (const name of ['package.json', 'scripts/verify-receipt-chain.js', 'review', 'policy', 'test/fixtures/chrome-receipt.js', 'test/fixtures/receipts/v1']) {
+    const target = path.join(repository, name);
+    await mkdir(path.dirname(target), { recursive: true });
+    await cp(path.join(ROOT, name), target, { recursive: true, dereference: false, verbatimSymlinks: true });
+  }
+  const goldenRoot = path.join(repository, 'test/fixtures/receipts/v1/review-receipts');
+  const external = path.join(fixture.projectRoot, 'external'); await mkdir(external, { mode: 0o700 });
+  return { ...fixture, repository, goldenRoot, external };
+}
+async function treeWitness(root) {
+  const witness = {};
+  async function visit(name) {
+    const target = path.join(root, name), info = await lstat(target);
+    witness[name] = { mode: info.mode & 0o7777, links: info.nlink,
+      kind: info.isSymbolicLink() ? 'symlink' : info.isDirectory() ? 'directory' : 'file',
+      value: info.isSymbolicLink() ? await readlink(target) : info.isFile() ? sha256Bytes(await readFile(target)) : null };
+    if (info.isDirectory()) for (const child of await readdir(target)) await visit(path.join(name, child));
+  }
+  await visit(''); return witness;
+}
+async function privateTree(root) {
+  await chmod(root, 0o700);
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const target = path.join(root, entry.name);
+    if (entry.isDirectory()) await privateTree(target); else await chmod(target, 0o600);
+  }
+}
+
+for (const attack of ['extra-directory-symlink', 'receipt-directory-symlink', 'golden-file-hardlink', 'unexpected-hidden-file']) {
+  test(`golden source custody: ${attack} is rejected without external or source mutation`, async t => {
+    const f = await verifierRepository(t);
+    const receiptName = '2026-09-14T00-00-00.000Z_v1-golden';
+    await writeFile(path.join(f.external, 'sentinel.txt'), 'External fixture content stays unchanged.\n', { mode: 0o600 });
+    if (attack === 'extra-directory-symlink') await symlink(f.external, path.join(f.goldenRoot, '2026-extra'));
+    if (attack === 'receipt-directory-symlink') {
+      const moved = path.join(f.external, receiptName);
+      await chmod(path.join(f.goldenRoot, receiptName), 0o700);
+      await rename(path.join(f.goldenRoot, receiptName), moved); await privateTree(moved);
+      await symlink(moved, path.join(f.goldenRoot, receiptName));
+    }
+    if (attack === 'golden-file-hardlink') await link(path.join(f.goldenRoot, receiptName, 'attestation.json'), path.join(f.external, 'shared-attestation.json'));
+    if (attack === 'unexpected-hidden-file') await writeFile(path.join(f.goldenRoot, '.unexpected'), 'unapproved inventory', { mode: 0o600 });
+    const external = await treeWitness(f.external), source = await treeWitness(f.goldenRoot);
+    const result = spawnVerifier(process.execPath, ['scripts/verify-receipt-chain.js'], { cwd: f.repository, encoding: 'utf8' });
+    assert.deepEqual(await treeWitness(f.external), external, 'default verification must not chmod or write through source links');
+    assert.deepEqual(await treeWitness(f.goldenRoot), source, 'the source inventory, links, modes, and bytes stay untouched');
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(JSON.parse(result.stdout).state, 'custody-broken');
+  });
+}
+
+test('golden sealing: directory substitution cannot redirect chmod to external inodes', async t => {
+  const f = await verifierRepository(t), receiptName = '2026-09-14T00-00-00.000Z_v1-golden';
+  const outside = path.join(f.external, receiptName);
+  await cp(path.join(f.goldenRoot, receiptName), outside, { recursive: true }); await privateTree(outside);
+  const external = await treeWitness(f.external), source = await treeWitness(f.goldenRoot);
+  const probe = `
+    import fs from 'node:fs';
+    import promises from 'node:fs/promises';
+    import path from 'node:path';
+    import { pathToFileURL } from 'node:url';
+    import { syncBuiltinESMExports } from 'node:module';
+    const real = { open: fs.openSync, fchmod: fs.fchmodSync, chmod: promises.chmod };
+    const opened = new Map(); let substituted = false;
+    function substitute(target) {
+      if (substituted || typeof target !== 'string' || !target.includes('/sidecar-receipt-verification-')) return;
+      const suffix = '/' + process.argv[2], index = target.indexOf(suffix);
+      if (index < 0) return;
+      const directory = target.slice(0, index + suffix.length);
+      fs.chmodSync(directory, 0o700);
+      fs.renameSync(directory, directory + '.held-original');
+      fs.symlinkSync(process.argv[1], directory);
+      substituted = true;
+    }
+    fs.openSync = (...args) => { const fd = real.open(...args); opened.set(fd, args[0]); return fd; };
+    fs.fchmodSync = (fd, mode) => { if (mode === 0o444 || mode === 0o555) substitute(opened.get(fd)); return real.fchmod(fd, mode); };
+    promises.chmod = async (target, mode) => { if (mode === 0o444 || mode === 0o555) substitute(target); return real.chmod(target, mode); };
+    syncBuiltinESMExports();
+    const { verifyReceiptChain } = await import(pathToFileURL(path.join(process.cwd(), 'scripts/verify-receipt-chain.js')));
+    const result = await verifyReceiptChain();
+    process.stdout.write(JSON.stringify({ result, substituted }));
+  `;
+  const run = spawnVerifier(process.execPath, ['--input-type=module', '-e', probe, outside, receiptName], { cwd: f.repository, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(JSON.parse(run.stdout).substituted, true, 'the fixture substitutes the copied directory at the permission-change boundary');
+  assert.deepEqual(await treeWitness(f.external), external, 'sealing must operate on already held copied inodes');
+  assert.deepEqual(await treeWitness(f.goldenRoot), source);
+  assert.equal(JSON.parse(run.stdout).result.state, 'custody-broken');
 });

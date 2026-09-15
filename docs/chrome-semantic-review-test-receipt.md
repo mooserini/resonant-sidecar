@@ -17,6 +17,16 @@ git status --short --branch
 git remote -v
 ```
 
+Run the two test gates sequentially. Concurrent full-suite execution is outside
+this claimed gate: during the correction, concurrent runs each failed the existing
+emergency-Stop race test during cleanup. A separate fixture-only diagnostic held
+an append lock for 4.5 seconds, reproducing the mechanism: the test's four-second
+Chrome-ready wait expired, then shutdown recovery observed `busy` and reported
+`Completion receipt custody broken`, masking the wait timeout. That mechanism
+was reproduced; attribution of the original concurrent failures to it remains
+an inference. Their logs are retained, and neither production behavior nor race
+test timing was changed. Passing sequential gates are required for this receipt.
+
 `check:chrome-review` runs the complete fake `LanguageModel` integration matrix
 and the existing runtime race suite. The integration uses the real side-panel
 controller, Chrome adapter, native message framing/parser, lifecycle router,
@@ -49,7 +59,7 @@ receipt; a favorable artifact in history does not restore a live grant.
 | Output and provenance | Malformed/trailing/duplicate/extra/unsupported/oversized output, invented references, contradictory findings, command/path/URL/permission/state/nonce/policy fields, source drift, sanitization failure, custody failure |
 | Protocol | Unsolicited and duplicate output; each review, active/candidate/policy/input/evidence/prompt/schema/adapter digest, invocation, generation, deadline, channel, and restart binding |
 | Crash recovery | Pending invocation at restart, terminal journal before receipt, receipt before journal mark, fully receipted invocation; each recovered twice |
-| Receipt custody | Original V1 golden bytes, a valid V1-to-V2 lifecycle, mixed-chain verification, semantic-artifact tamper detection, supplied-root verification without mutation |
+| Receipt custody | Original V1 golden bytes, a valid V1-to-V2 lifecycle, mixed-chain verification, semantic-artifact tamper detection, supplied-root verification without mutation; extra/replaced golden directory symlinks, golden hardlinks, unexpected inventory, and directory substitution at sealing |
 
 Every lifecycle case checks active-pin bytes, withheld premature nonces,
 model-input isolation, fixed protocol actions and permissions, absent network
@@ -68,11 +78,24 @@ These names do not claim a model ran when no execution was observed.
 
 ## Mixed receipt command
 
-With no arguments, `verify:receipts` copies the committed golden V1 receipts
-into a disposable root, restores their documented Git-unrepresentable modes,
-appends fixed V2 receipt fixtures through the real writer, and names the intact
-mixed tail. The output labels its source `disposable-mixed-fixture` and its
-proof `receipt-chain`. It cleans that temporary root after verification.
+With no arguments, `verify:receipts` validates the committed golden V1 source
+against the exact 28-file inventory and its directory topology (with only an
+optional empty `.pending` directory). Links, special files, missing paths, and
+unexpected entries fail before permission changes. It snapshots validated bytes
+through held file descriptors, reconstructs only fixed expected paths in a
+private disposable root, and validates that entire copy before restoring the
+documented Git-unrepresentable modes. Recursive sealing uses `fchmod` on held,
+no-follow-opened inodes, with ancestor identity and inventory checks before
+descent and use; cleanup likewise changes only held temporary directory inodes.
+The regression suite substitutes a copied directory at the permission-change
+boundary and checks that external modes and bytes remain unchanged.
+
+The command then appends fixed V2 receipt fixtures through the real writer, using
+fixed timestamps and a collision-free fixture ID sequence through its existing
+UUID hook, and names the reproducible intact mixed tail. The output labels its source
+`disposable-mixed-fixture` and its proof `receipt-chain`. It cleans that temporary
+root after verification. These checks do not claim an atomic snapshot or an OS
+security boundary against arbitrary concurrent same-user filesystem changes.
 
 The golden V1 fixture has the original synthetic `available -> review-failed`
 sequence. Its hashes and receipt layout remain valid, but that sequence is not
@@ -97,6 +120,12 @@ of concurrently changing storage.
 
 Original golden V1 tail:
 `c2a28877cf698c504739dd2f3089c14b0f128c66bc8dcbc1791e292fa650aeb5`.
+
+Reproducible disposable mixed-fixture tail (eight events, policies 1 and 2):
+`5edc6cee621128bf1956ebfa4f47a6c0e8ad3c4132bad96e35b67f8fb81d163b`.
+The earlier Task 10 command used random receipt IDs; its recorded tail was a
+single-run result, not a reproducible fixture identity. Supplied-root verification
+and production receipt ID generation are unchanged.
 
 ## Claim boundary
 
