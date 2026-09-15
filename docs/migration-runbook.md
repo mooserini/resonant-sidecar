@@ -161,12 +161,28 @@ After the preparation command reports `liveVerification: pending-human-checkpoin
 3. Compare the observed ID with `extensionIdentity.expectedId`. If it differs,
    stop. Do not reload, open the side panel, or change the native-host manifest.
    A new proposed origin requires a newly generated plan and separate approval.
-4. Even if it matches, stop before registration replacement. Preparation contains
-   no completion path for that authority change. The later live checkpoint must show the exact
-   registration bytes and receive human approval before switching them.
-5. Only after that separately approved switch may the side panel run the
+4. Even if it matches, stop before registration replacement. Do not open that
+   panel. `--migrate` still does not change the live launcher or manifest.
+5. Registration replacement is a separate installer command and a second explicit
+   approval. Chrome Dev must be quit. The command writes only the reviewed
+   launcher (`0700`) and Chrome Dev native-host manifest (`0600`):
+
+```sh
+node scripts/install-macos.js \
+  --switch-registration \
+  --extension-id dcgoknilbkadmmiahhgefnckiiihgekp \
+  --expected-current-hash REVIEWED_CURRENT_SHA256 \
+  --reviewed-install-hash REVIEWED_INSTALL_SHA256 \
+  --observed-stable-id dcgoknilbkadmmiahhgefnckiiihgekp
+```
+
+   It refuses a mismatched observed ID, a stale current hash, a broken stored
+   chain, or drift in the prepared bootstrap/extension/bundle trees. It does not
+   restage those trees. V1 copies remain in `runtime/migration-recovery/`.
+6. Only after that approved switch may the stable-path side panel run the
    zero-tool continuity turns, process evidence, listener check, full Chrome Dev
-   exit, relaunch, and repeated continuity check.
+   exit, relaunch, and repeated continuity check. Disable the old V1 unpacked
+   load first. Do not start Review and Refresh on a real candidate here.
 
 The extension UI cannot perform these profile-level actions. A human must be
 present for directory selection, any Chrome warning, extension reload, and the

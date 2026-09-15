@@ -1,6 +1,16 @@
 # Resonant Sidecar
 
-Resonant Sidecar is a local Chrome Dev side panel for one durable Codex CLI conversation. It is an intentionally narrow prototype: text enters the panel, crosses Chrome Native Messaging, and reaches `codex app-server` over stdio. Assistant text returns over the same path.
+Resonant Sidecar is a local Chrome Dev side panel for one durable agent
+conversation. It is not a Codex-only clone of OpenAI's official extension.
+The current prototype attaches Codex CLI `app-server` over Chrome Native
+Messaging as the first backend: text enters the panel, crosses a native host,
+and assistant text returns over the same path. That is a first-agent proof.
+The product intent is one sidecar, operator-selected agents (Grok Build, Codex,
+Hermes, Antigravity, and later ones), and one protective schema they all obey.
+Idle Ready still launches the first backend today (`codex app-server`). That is
+not a reason to bind the product to Codex, and it is why a second vendor
+extension would be the wrong fix. Agent selection is a later, separately
+reviewed control-plane change.
 
 ## V1 boundary
 

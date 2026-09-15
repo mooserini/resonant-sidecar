@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { VersionStore } from '../bootstrap/version-store.js';
-import { buildInstallPlan, inspectExecutable, migrateInstallation, parseInstallerArgs } from '../scripts/install-macos.js';
+import { buildInstallPlan, inspectExecutable, migrateInstallation, parseInstallerArgs, switchRegistration } from '../scripts/install-macos.js';
 import { inspectCurrentInstallation, verifyInstallPlan, verifyStoredMigrationChain } from '../scripts/verify-install-plan.js';
 import { loadReviewPolicy } from '../review/policy-registry.js';
 
@@ -31,6 +31,8 @@ test('V2 install plan seals exact control identities and omits declaration-only 
   assert.match(plan.runtimeEntry.contents, /loadReviewPolicy\(2\)/);
   assert.match(plan.runtimeEntry.contents, /chromeContext/);
   assert.match(plan.runtimeEntry.contents, /chromeReviewJournal/);
+  assert.match(plan.runtimeEntry.contents, /expected && \(info\.nlink !== 1 \|\| \(info\.mode & 0o7777\) !== 0o400\)/);
+  assert.doesNotMatch(plan.runtimeEntry.contents, /!info\.isFile\(\) \|\| info\.nlink !== 1 \|\| \(expected &&/);
 });
 
 test('V2 stored plan verifier rejects omitted inventory and inconsistent shared contract before approval hash', () => {
@@ -175,14 +177,24 @@ async function replaceSealed(file, body) {
 test('migration requires the exact explicit confirmation triple', () => {
   const currentHash = 'a'.repeat(64);
   const installHash = 'b'.repeat(64);
-  assert.deepEqual(parseInstallerArgs([]), { migrate: false, extensionId: null, expectedCurrentHash: null, reviewedInstallHash: null });
+  assert.deepEqual(parseInstallerArgs([]), { migrate: false, switchRegistration: false, extensionId: null, expectedCurrentHash: null, reviewedInstallHash: null, observedStableId: null });
   assert.throws(() => parseInstallerArgs(['--migrate']), /extension-id/i);
   assert.throws(() => parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID]), /expected-current-hash/i);
   assert.throws(() => parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash]), /reviewed-install-hash/i);
   assert.throws(() => parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash, '--reviewed-install-hash', installHash]), /duplicate/i);
-  assert.throws(() => parseInstallerArgs(['--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash]), /migrate/i);
+  assert.throws(() => parseInstallerArgs(['--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash]), /migrate|switch-registration/i);
   assert.throws(() => parseInstallerArgs(['--install', '--extension-id', EXTENSION_ID]), /unknown/i);
-  assert.deepEqual(parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash]), { migrate: true, extensionId: EXTENSION_ID, expectedCurrentHash: currentHash, reviewedInstallHash: installHash });
+  assert.deepEqual(parseInstallerArgs(['--migrate', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash]), { migrate: true, switchRegistration: false, extensionId: EXTENSION_ID, expectedCurrentHash: currentHash, reviewedInstallHash: installHash, observedStableId: null });
+});
+
+test('registration switch requires the confirmation triple and observed stable-path ID', () => {
+  const currentHash = 'a'.repeat(64);
+  const installHash = 'b'.repeat(64);
+  assert.throws(() => parseInstallerArgs(['--switch-registration']), /extension-id/i);
+  assert.throws(() => parseInstallerArgs(['--switch-registration', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash]), /observed-stable-id/i);
+  assert.throws(() => parseInstallerArgs(['--migrate', '--switch-registration', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash, '--observed-stable-id', EXTENSION_ID]), /mutually exclusive/i);
+  assert.throws(() => parseInstallerArgs(['--observed-stable-id', EXTENSION_ID]), /switch-registration/i);
+  assert.deepEqual(parseInstallerArgs(['--switch-registration', '--extension-id', EXTENSION_ID, '--expected-current-hash', currentHash, '--reviewed-install-hash', installHash, '--observed-stable-id', EXTENSION_ID]), { migrate: false, switchRegistration: true, extensionId: EXTENSION_ID, expectedCurrentHash: currentHash, reviewedInstallHash: installHash, observedStableId: EXTENSION_ID });
 });
 
 test('inspects a concrete non-symlink Codex executable and binds its bytes', async t => {
@@ -563,4 +575,99 @@ test('migration fails closed on stale hash and symlink target without replacing 
   await assert.rejects(() => migrateInstallation(symlinkPlan, { reviewedInstallHash: symlinkPlan.installHash, regeneratePlan: async () => symlinkPlan }), /symbolic link|custody/i);
   assert.equal(await readFile(launcherPath, 'utf8'), 'old');
   assert.equal(await readFile(manifestPath, 'utf8'), 'old-manifest');
+});
+
+async function unsealTree(root) {
+  await chmod(root, 0o700).catch(() => {});
+  let entries = [];
+  try { entries = await import('node:fs/promises').then(fs => fs.readdir(root, { withFileTypes: true })); }
+  catch { return; }
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) await unsealTree(full);
+    else await chmod(full, 0o600).catch(() => {});
+  }
+}
+
+async function preparedSwitchFixture(t) {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sidecar-switch-')));
+  const homeDir = path.join(root, 'home');
+  const projectRoot = path.join(root, 'project');
+  t.after(async () => {
+    await unsealTree(path.join(projectRoot, 'runtime')).catch(() => {});
+    await unsealTree(path.join(homeDir, 'Library/Application Support/Resonant Sidecar')).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(path.join(projectRoot, 'runtime'), { recursive: true, mode: 0o755 });
+  const launcherPath = path.join(homeDir, 'Library/Application Support/Resonant Sidecar/native-host');
+  const manifestPath = path.join(homeDir, 'Library/Application Support/Google/Chrome Dev/NativeMessagingHosts/com.resonantmirror.sidecar.json');
+  await mkdir(path.dirname(launcherPath), { recursive: true, mode: 0o700 });
+  await mkdir(path.dirname(manifestPath), { recursive: true, mode: 0o700 });
+  const oldLauncher = '#!/bin/sh\nexec /old/v1\n';
+  const oldManifest = '{"name":"com.resonantmirror.sidecar","path":"/old/v1"}\n';
+  await writeFile(launcherPath, oldLauncher, { mode: 0o700 });
+  await writeFile(manifestPath, oldManifest, { mode: 0o600 });
+  const current = await inspectCurrentInstallation({ launcher: launcherPath, manifest: manifestPath });
+  const inspection = sourceInspection();
+  const concreteCodex = await realpath(process.execPath);
+  const executableIdentity = await inspectExecutable(concreteCodex);
+  const plan = buildInstallPlan({ extensionId: EXTENSION_ID, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection: inspection, homeDir, projectRoot, nodePath: process.execPath, codexPath: concreteCodex, codexExecutable: executableIdentity });
+  await migrateInstallation(plan, { reviewedInstallHash: plan.installHash, regeneratePlan: async () => plan });
+  return { plan, launcherPath, manifestPath, oldLauncher, oldManifest, inspection };
+}
+
+test('registration switch refuses a mismatched observed ID without writing', async t => {
+  const { plan, launcherPath, manifestPath, oldLauncher, oldManifest } = await preparedSwitchFixture(t);
+  await assert.rejects(() => switchRegistration(plan, { reviewedInstallHash: plan.installHash, observedStableId: 'a'.repeat(32), regeneratePlan: async () => plan }), /observed stable-path id/i);
+  assert.equal(await readFile(launcherPath, 'utf8'), oldLauncher);
+  assert.equal(await readFile(manifestPath, 'utf8'), oldManifest);
+});
+
+test('registration switch refuses a stale live hash without writing', async t => {
+  const { plan, launcherPath, manifestPath, oldManifest } = await preparedSwitchFixture(t);
+  await writeFile(launcherPath, '#!/bin/sh\nexec /tampered\n', { mode: 0o700 });
+  await assert.rejects(() => switchRegistration(plan, { reviewedInstallHash: plan.installHash, observedStableId: EXTENSION_ID, regeneratePlan: async () => plan }), /current installation changed/i);
+  assert.equal(await readFile(manifestPath, 'utf8'), oldManifest);
+});
+
+test('registration switch refuses a missing stored chain without writing', async t => {
+  const { plan, launcherPath, manifestPath, oldLauncher, oldManifest } = await preparedSwitchFixture(t);
+  await chmod(plan.paths.migrationReceipts, 0o700);
+  await rm(path.join(plan.paths.migrationReceipts, 'after.json'));
+  await assert.rejects(() => switchRegistration(plan, { reviewedInstallHash: plan.installHash, observedStableId: EXTENSION_ID, regeneratePlan: async () => plan }), /stored migration|receipt|custody|entries/i);
+  assert.equal(await readFile(launcherPath, 'utf8'), oldLauncher);
+  assert.equal(await readFile(manifestPath, 'utf8'), oldManifest);
+});
+
+test('registration switch refuses bootstrap drift without writing', async t => {
+  const { plan, launcherPath, manifestPath, oldLauncher, oldManifest } = await preparedSwitchFixture(t);
+  const target = path.join(plan.paths.trustedBootstrap, 'runtime-entry.js');
+  await chmod(plan.paths.trustedBootstrap, 0o700);
+  await replaceSealed(target, `${await readFile(target, 'utf8')}\n`);
+  await chmod(plan.paths.trustedBootstrap, 0o500);
+  await assert.rejects(() => switchRegistration(plan, { reviewedInstallHash: plan.installHash, observedStableId: EXTENSION_ID, regeneratePlan: async () => plan }), /artifact verification|pinned control|changed/i);
+  assert.equal(await readFile(launcherPath, 'utf8'), oldLauncher);
+  assert.equal(await readFile(manifestPath, 'utf8'), oldManifest);
+});
+
+test('registration switch replaces only launcher and manifest after a matching observed ID', async t => {
+  const { plan, launcherPath, manifestPath, oldLauncher, oldManifest, inspection } = await preparedSwitchFixture(t);
+  const adapterBefore = await readFile(path.join(plan.paths.stableExtension, 'chrome-review-adapter.js'));
+  const result = await switchRegistration(plan, { reviewedInstallHash: plan.installHash, observedStableId: EXTENSION_ID, regeneratePlan: async () => plan });
+  assert.equal(result.mode, 'registration-switched');
+  assert.equal(result.installHash, plan.installHash);
+  assert.equal(result.extensionId, EXTENSION_ID);
+  assert.equal(result.origin, `chrome-extension://${EXTENSION_ID}/`);
+  assert.equal(result.liveVerification, 'pending-continuity');
+  assert.equal(await readFile(launcherPath, 'utf8'), plan.launcher.contents);
+  assert.equal(await readFile(manifestPath, 'utf8'), `${canonicalJson(plan.manifest.contents)}\n`);
+  assert.notEqual(await readFile(launcherPath, 'utf8'), oldLauncher);
+  assert.notEqual(await readFile(manifestPath, 'utf8'), oldManifest);
+  assert.equal((await stat(launcherPath)).mode & 0o777, 0o700);
+  assert.equal((await stat(manifestPath)).mode & 0o777, 0o600);
+  assert.equal(await readFile(path.join(plan.paths.recovery, 'native-host'), 'utf8'), oldLauncher);
+  assert.equal(await readFile(path.join(plan.paths.recovery, 'native-host-manifest.json'), 'utf8'), oldManifest);
+  assert.deepEqual(await readFile(path.join(plan.paths.stableExtension, 'chrome-review-adapter.js')), adapterBefore);
+  assert.deepEqual(await readFile(path.join(plan.paths.trustedBootstrap, 'runtime-entry.js')), Buffer.from(plan.runtimeEntry.contents));
+  for (const file of inspection.trustedBootstrap.files) assert.deepEqual(await readFile(path.join(plan.paths.trustedBootstrap, file.relativePath)), file.bytes);
 });

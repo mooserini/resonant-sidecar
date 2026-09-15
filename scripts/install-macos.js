@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { inspectInitialBundle } from './build-initial-bundle.js';
-import { inspectCurrentInstallation, verifyInstallPlan } from './verify-install-plan.js';
+import { inspectCurrentInstallation, verifyInstallPlan, verifyStoredMigrationChain } from './verify-install-plan.js';
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
 
 const HOST_NAME = 'com.resonantmirror.sidecar';
@@ -23,29 +23,40 @@ const compare = (left, right) => Buffer.compare(Buffer.from(left, 'utf8'), Buffe
 
 export function parseInstallerArgs(args) {
   let migrate = false;
+  let switchRegistration = false;
   let extensionId = null;
   let expectedCurrentHash = null;
   let reviewedInstallHash = null;
+  let observedStableId = null;
   const seen = new Set();
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (seen.has(argument)) throw new TypeError(`Duplicate installer argument: ${argument}`);
     seen.add(argument);
     if (argument === '--migrate') { migrate = true; continue; }
+    if (argument === '--switch-registration') { switchRegistration = true; continue; }
     if (argument === '--extension-id') { extensionId = args[++index] ?? null; continue; }
     if (argument === '--expected-current-hash') { expectedCurrentHash = args[++index] ?? null; continue; }
     if (argument === '--reviewed-install-hash') { reviewedInstallHash = args[++index] ?? null; continue; }
+    if (argument === '--observed-stable-id') { observedStableId = args[++index] ?? null; continue; }
     throw new TypeError(`Unknown installer argument: ${argument}`);
   }
   if (extensionId !== null && !EXTENSION_ID_PATTERN.test(extensionId)) throw new TypeError('extension-id must be 32 lowercase letters from a through p');
   if (expectedCurrentHash !== null && !SHA256.test(expectedCurrentHash)) throw new TypeError('expected-current-hash must be a lowercase SHA-256 digest');
   if (reviewedInstallHash !== null && !SHA256.test(reviewedInstallHash)) throw new TypeError('reviewed-install-hash must be a lowercase SHA-256 digest');
+  if (observedStableId !== null && !EXTENSION_ID_PATTERN.test(observedStableId)) throw new TypeError('observed-stable-id must be 32 lowercase letters from a through p');
+  if (migrate && switchRegistration) throw new TypeError('--migrate and --switch-registration are mutually exclusive');
   if (migrate && extensionId === null) throw new TypeError('--migrate requires --extension-id');
   if (migrate && expectedCurrentHash === null) throw new TypeError('--migrate requires --expected-current-hash');
   if (migrate && reviewedInstallHash === null) throw new TypeError('--migrate requires --reviewed-install-hash');
-  if (!migrate && expectedCurrentHash !== null) throw new TypeError('--expected-current-hash is valid only with --migrate');
-  if (!migrate && reviewedInstallHash !== null) throw new TypeError('--reviewed-install-hash is valid only with --migrate');
-  return { migrate, extensionId, expectedCurrentHash, reviewedInstallHash };
+  if (switchRegistration && extensionId === null) throw new TypeError('--switch-registration requires --extension-id');
+  if (switchRegistration && expectedCurrentHash === null) throw new TypeError('--switch-registration requires --expected-current-hash');
+  if (switchRegistration && reviewedInstallHash === null) throw new TypeError('--switch-registration requires --reviewed-install-hash');
+  if (switchRegistration && observedStableId === null) throw new TypeError('--switch-registration requires --observed-stable-id');
+  if (!migrate && !switchRegistration && expectedCurrentHash !== null) throw new TypeError('--expected-current-hash is valid only with --migrate or --switch-registration');
+  if (!migrate && !switchRegistration && reviewedInstallHash !== null) throw new TypeError('--reviewed-install-hash is valid only with --migrate or --switch-registration');
+  if (!switchRegistration && observedStableId !== null) throw new TypeError('--observed-stable-id is valid only with --switch-registration');
+  return { migrate, switchRegistration, extensionId, expectedCurrentHash, reviewedInstallHash, observedStableId };
 }
 
 export async function inspectExecutable(executablePath) {
@@ -99,7 +110,7 @@ function heldDigest(file, expected) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = fstatSync(fd);
-    if (!info.isFile() || info.nlink !== 1 || (expected && (info.mode & 0o7777) !== 0o400)) throw new Error('Pinned control custody changed');
+    if (!info.isFile() || (expected && (info.nlink !== 1 || (info.mode & 0o7777) !== 0o400))) throw new Error('Pinned control custody changed');
     const bytes = readFileSync(fd); const digest = sha256Bytes(bytes);
     if (bytes.length !== info.size || (expected && digest !== expected)) throw new Error('Pinned control bytes changed');
     return digest;
@@ -381,6 +392,58 @@ export async function migrateInstallation(plan, { reviewedInstallHash, regenerat
   }
 }
 
+export async function switchRegistration(plan, { reviewedInstallHash, observedStableId, regeneratePlan, durability = DEFAULT_DURABILITY } = {}) {
+  if (!SHA256.test(reviewedInstallHash ?? '') || reviewedInstallHash !== plan?.installHash) throw new Error('Exact reviewed install hash is required');
+  if (!EXTENSION_ID_PATTERN.test(observedStableId ?? '') || observedStableId !== plan.extensionId) throw new Error('Observed stable-path ID does not match the reviewed extension ID');
+  verifyInstallPlan(plan);
+  let payload = PLAN_PAYLOAD.get(plan);
+  if (!payload) throw new Error('Install plan was not created by this trusted installer process');
+  const rebuild = regeneratePlan ?? (async () => {
+    const currentInstallation = await inspectCurrentInstallation({ launcher: plan.paths.launcher, manifest: plan.paths.manifest });
+    const sourceInspection = await inspectInitialBundle({ repoRoot: payload.build.root });
+    const codexExecutable = await inspectExecutable(payload.build.codexPath);
+    return buildInstallPlan({ extensionId: payload.build.extensionId, expectedCurrentHash: currentInstallation.currentHash, currentInstallation, sourceInspection, homeDir: payload.build.homeDir, nodePath: payload.build.nodePath, codexPath: payload.build.codexPath, codexExecutable, projectRoot: payload.build.root });
+  });
+  const regenerated = await rebuild();
+  verifyInstallPlan(regenerated);
+  if (regenerated.installHash !== reviewedInstallHash) throw new Error('Reviewed install hash does not match regenerated plan');
+  plan = regenerated;
+  payload = PLAN_PAYLOAD.get(plan);
+  if (!payload) throw new Error('Regenerated install plan lacks trusted custody');
+  const current = await inspectCurrentInstallation({ launcher: plan.paths.launcher, manifest: plan.paths.manifest });
+  if (current.currentHash !== plan.expectedCurrentHash) throw new Error('Current installation changed; rebuild and review the dry-run plan');
+  const codexNow = await inspectExecutable(plan.codexExecutable.path);
+  if (canonicalJson(codexNow) !== canonicalJson(plan.codexExecutable)) throw new Error('Codex executable changed; rebuild and review the plan');
+  await verifyStoredMigrationChain(plan);
+  const recoveryLauncher = await readFile(path.join(plan.paths.recovery, 'native-host'));
+  const recoveryManifest = await readFile(path.join(plan.paths.recovery, 'native-host-manifest.json'));
+  if (sha256Bytes(recoveryLauncher) !== plan.before.launcher.sha256 || sha256Bytes(recoveryManifest) !== plan.before.manifest.sha256) throw new Error('V1 recovery copies changed');
+  await verifyArtifactFiles([
+    ...plan.trustedBootstrap.files,
+    ...plan.stableExtension.files,
+    ...plan.bundle.files,
+    plan.bundle.manifestArtifact,
+    { path: 'active/pin.json', ...plan.activePin },
+    { path: 'recovery-state.json', ...plan.baseline.recoveryState },
+    { path: 'installations/migration-v1.json', ...plan.baseline.installationWitness },
+  ]);
+  const launcherBytes = plan.launcher.contents;
+  const manifestBytes = `${canonicalJson(plan.manifest.contents)}\n`;
+  if (sha256Bytes(launcherBytes) !== plan.launcher.sha256 || sha256Bytes(manifestBytes) !== plan.manifest.sha256) throw new Error('Planned registration bytes changed');
+  await atomicFile(plan.paths.launcher, launcherBytes, 0o700, durability);
+  await atomicFile(plan.paths.manifest, manifestBytes, 0o600, durability);
+  const after = await inspectCurrentInstallation({ launcher: plan.paths.launcher, manifest: plan.paths.manifest });
+  if (after.launcher.sha256 !== plan.launcher.sha256 || after.manifest.sha256 !== plan.manifest.sha256) throw new Error('Registration write verification failed');
+  return Object.freeze({
+    mode: 'registration-switched',
+    installHash: plan.installHash,
+    extensionId: plan.extensionId,
+    origin: `chrome-extension://${plan.extensionId}/`,
+    recovery: plan.paths.recovery,
+    liveVerification: 'pending-continuity',
+  });
+}
+
 async function main() {
   const options = parseInstallerArgs(process.argv.slice(2));
   if (!options.extensionId) {
@@ -389,6 +452,7 @@ async function main() {
       'Supply the exact Chrome Dev unpacked extension ID:',
       '  node scripts/install-macos.js --extension-id <32-character-id>',
       'No migration can occur without --migrate, exact reviewed current hash, and exact reviewed install hash.',
+      'No registration switch can occur without --switch-registration, that same triple, and --observed-stable-id.',
       '',
     ].join('\n'));
     return;
@@ -396,11 +460,16 @@ async function main() {
   const homeDir = os.homedir();
   const supportRoot = path.join(homeDir, 'Library', 'Application Support');
   const current = await inspectCurrentInstallation({ launcher: path.join(supportRoot, 'Resonant Sidecar', 'native-host'), manifest: path.join(supportRoot, 'Google', 'Chrome Dev', 'NativeMessagingHosts', `${HOST_NAME}.json`) });
-  if (options.migrate && options.expectedCurrentHash !== current.currentHash) throw new Error('Current installation hash does not match the explicit confirmation');
+  if ((options.migrate || options.switchRegistration) && options.expectedCurrentHash !== current.currentHash) throw new Error('Current installation hash does not match the explicit confirmation');
   const sourceInspection = await inspectInitialBundle({ repoRoot: projectRoot });
   const codexPath = await realpath(path.join(homeDir, '.local', 'bin', 'codex'));
   const codexExecutable = await inspectExecutable(codexPath);
   const plan = buildInstallPlan({ extensionId: options.extensionId, expectedCurrentHash: current.currentHash, currentInstallation: current, sourceInspection, codexPath, codexExecutable });
+  if (options.switchRegistration) {
+    const result = await switchRegistration(plan, { reviewedInstallHash: options.reviewedInstallHash, observedStableId: options.observedStableId });
+    process.stdout.write(`${canonicalJson(result)}\n`);
+    return;
+  }
   if (!options.migrate) {
     process.stdout.write(`${canonicalJson(plan)}\n`);
     return;
