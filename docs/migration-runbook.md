@@ -1,19 +1,21 @@
 # Sealed V2 Preparation and Migration Runbook
 
-Status: preparation only. Chrome-review Task 9 prepares a dry-run V2 control
-plane. It performs no live migration, Chrome registration change, extension
-reload, application launch, or model invocation. Historical V1 receipts and the
-stopped original Task 11 retain their original meaning.
+Status: live V1 remains attached. Chrome-review Tasks 1–11 are locally complete.
+The next operator plan is `docs/superpowers/plans/2026-09-15-v1-to-v2-migration.md`.
+This runbook is still the installer/recovery text. It does not by itself
+authorize `--migrate`, a registration switch, or a candidate review.
 
 ## Hard stop
 
-Chrome-review Task 10 must pass the mocked integration gate. Task 11 has its own
-human-present approval boundary for one exact inert capability probe; it does
-not authorize installation or a real candidate review. The old Task 12 remains
-blocked. A later migration must show the complete read-only plan and stop there.
-Do not run `--migrate`, change the unpacked
-extension directory, reload Chrome Dev, or open the side panel until Tom
-explicitly approves that exact plan and install hash.
+Do not run `--migrate` until Tom approves the binding dry-run from the 2026-09-15
+plan (Chrome Dev quit, clean HEAD after that plan commit, `--extension-id`
+`dcgoknilbkadmmiahhgefnckiiihgekp`). That ID is the derived unpacked ID of the
+stable path, not the live V1 ID `algfplhdbapdaoimggafkgmpmnadfppl`. Approval of
+the inert capability probe, of Task 10, or of a preview hash taken before the
+plan commit is not approval of `--migrate`.
+
+The old visible-review-refresh Task 12 remains blocked. `--migrate` still does
+not replace registration. Do not hand-copy launcher or manifest bytes.
 
 Approval of a different plan, source commit, extension ID, current-install hash,
 Codex executable identity, bundle digest, inventory, or install hash is not

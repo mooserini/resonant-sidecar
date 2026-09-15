@@ -48,10 +48,10 @@ Preview the plan using the already-observed extension ID without changing files:
    node scripts/install-macos.js --extension-id EXTENSION_ID
    ```
 
-The Chrome-review amendment remains preparation-only. Its Task 10 mocked
-integration gate and Task 11 separately approved, human-present inert capability
-probe do not authorize installation. The old Task 12 and live migration remain
-blocked until a later exact migration plan receives separate approval.
+The Chrome-review Task 10 mocked gate and Task 11 inert capability check do not
+authorize installation. Live migration follows
+`docs/superpowers/plans/2026-09-15-v1-to-v2-migration.md`. The old Task 12
+candidate Review-and-Refresh remains a later plan.
 
 The current installer is now migration-oriented. With only `--extension-id`, it
 performs a read-only inspection of committed `HEAD` and the current V1 launcher
