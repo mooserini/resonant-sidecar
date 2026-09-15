@@ -81,7 +81,8 @@ test('trusted closure ignores import-shaped text in comments and string literals
     "const pattern = /import\\('ambient-regex-package'\\)/;",
     "const template = `import('ambient-template-text')`;",
     "import { readFile } from 'node:fs/promises';",
-    'void message; void pattern; void template; void readFile;',
+    "export function encode(value) { return Buffer.from(value, 'utf8'); }",
+    'void message; void pattern; void template; void readFile; void encode;',
     '',
   ].join('\n');
   assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);

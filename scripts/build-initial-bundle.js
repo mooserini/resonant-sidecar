@@ -261,6 +261,7 @@ function importSpecifiers(source, name) {
       index += 1;
       continue;
     }
+    if (token.value === 'export' && !['{', '*'].includes(tokens[index + 1]?.value)) continue;
     const end = statementEnd(index + 1);
     const from = tokens.slice(index + 1, end).findIndex(candidate => candidate.type === 'identifier' && candidate.value === 'from');
     if (from !== -1) literal(tokens[index + 2 + from]);
