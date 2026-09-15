@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { mkdtemp, chmod, mkdir, readdir, rm, writeFile, realpath } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { ReceiptStore } from '../review/receipt-store.js';
 import { createDesktopHandoff, openReviewReport, openChromeDeveloperProject } from '../presentation/desktop-handoff.js';
@@ -116,9 +116,10 @@ test('desktop launch binds the fixed project and has no task, text, or model arg
   const f = await fixture(t); const fake = processDouble();
   const api = createDesktopHandoff({ receiptRoot: f.root, codexPath: f.codexPath, spawn: fake.spawn });
   const result = await api.openChromeDeveloperProject();
-  assert.deepEqual(result, { status: 'opened', project: { name: 'Chrome Developer', id: '78e19937-a254-4343-847d-171e0f1673d0', path: '/Users/thomaskenny/chrome' } });
+  const chromeProject = path.join(homedir(), 'chrome');
+  assert.deepEqual(result, { status: 'opened', project: { name: 'Chrome Developer', id: '78e19937-a254-4343-847d-171e0f1673d0', path: chromeProject } });
   assert.ok(Object.isFrozen(result.project));
-  assert.deepEqual(fake.calls, [{ command: f.codexPath, args: ['app', '/Users/thomaskenny/chrome'], options: { cwd: '/', env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: '/Users/thomaskenny' }, shell: false, stdio: ['ignore', 'pipe', 'pipe'] } }]);
+  assert.deepEqual(fake.calls, [{ command: f.codexPath, args: ['app', chromeProject], options: { cwd: '/', env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: homedir() }, shell: false, stdio: ['ignore', 'pipe', 'pipe'] } }]);
 });
 
 test('resolves the trusted discovery symlink and pins its concrete executable', async t => {
@@ -132,10 +133,10 @@ test('resolves the trusted discovery symlink and pins its concrete executable', 
 test('desktop success status is independent of informational CLI output, which is discarded', async t => {
   const f = await fixture(t); const fake = processDouble(child => {
     child.stdout.write('Opening Desktop app at /Applications/Codex.app\n');
-    child.stderr.write('Opening workspace /Users/thomaskenny/chrome\n');
+    child.stderr.write(`Opening workspace ${path.join(homedir(), 'chrome')}\n`);
   });
   const result = await createDesktopHandoff({ codexPath: f.codexPath, spawn: fake.spawn }).openChromeDeveloperProject();
-  assert.deepEqual(result, { status: 'opened', project: { name: 'Chrome Developer', id: '78e19937-a254-4343-847d-171e0f1673d0', path: '/Users/thomaskenny/chrome' } });
+  assert.deepEqual(result, { status: 'opened', project: { name: 'Chrome Developer', id: '78e19937-a254-4343-847d-171e0f1673d0', path: path.join(homedir(), 'chrome') } });
 });
 
 for (const alteration of ['mode', 'bytes', 'inode', 'symlink']) {

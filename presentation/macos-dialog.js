@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import { types } from 'node:util';
 
 const FAILURE_SCRIPT = 'return button returned of (display dialog "Review failed" buttons {"Open review report", "Continue in Codex", "Dismiss"} default button "Dismiss")';
@@ -43,7 +44,7 @@ export function runPresentationProcess(command, args, spawnChild = spawn, deskto
       else reject(failure('presentation-process-failed'));
     };
     try {
-      child = spawnChild(command, args, { cwd: '/', env: { ...ENV, ...(desktop ? { HOME: '/Users/thomaskenny' } : {}) }, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnChild(command, args, { cwd: '/', env: { ...ENV, ...(desktop ? { HOME: os.homedir() } : {}) }, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
       timer = setTimeout(() => finish(false, true), TIMEOUT);
       child.once('error', () => finish(false, true));
       child.once('close', (code, signal) => finish(code === 0 && signal === null));

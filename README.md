@@ -1,5 +1,8 @@
 # Resonant Sidecar
 
+Experimental local prototype. MIT licensed. Not affiliated with OpenAI, Google,
+or any agent vendor.
+
 Resonant Sidecar is a local Chrome Dev side panel for one durable agent
 conversation. It is not a Codex-only clone of OpenAI's official extension.
 The current prototype attaches Codex CLI `app-server` over Chrome Native
@@ -155,4 +158,5 @@ npm test
 npm run check
 ```
 
-This checkout is local-only. It has no configured Git remote and is not approved for publication.
+Generated runtime, migration receipts, and Chrome registration stay on the
+operator machine. They are not part of this repository.

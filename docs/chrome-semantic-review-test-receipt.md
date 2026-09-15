@@ -142,7 +142,7 @@ the ignored Task 10 report and TAP receipts.
 ## Human-present inert capability check
 
 Date: 2026-09-15. Probe document commit: `fdef7c327369a4fe5e451acf7f7644d2be365d84`.
-Worktree: `/Users/thomaskenny/Developer/Uncle-Russet/resonant-sidecar/.worktrees/visible-review-refresh`.
+Worktree: `$HOME/Developer/Uncle-Russet/resonant-sidecar/.worktrees/visible-review-refresh`.
 This checkpoint does not load the prepared V2 extension, change native-host
 registration, migrate V1, review a candidate, or push.
 
@@ -154,7 +154,7 @@ and its resource consequence before any `LanguageModel.create()` or `prompt()`.
 
 - Browser: Google Chrome Dev 155.0.8048.0, local Agent profile (`Profile 3`)
 - Already-loaded unpacked V1 extension ID: `algfplhdbapdaoimggafkgmpmnadfppl`
-- Loaded path: `/Users/thomaskenny/Developer/Uncle-Russet/resonant-sidecar/extension`
+- Loaded path: `$HOME/Developer/Uncle-Russet/resonant-sidecar/extension`
 - Side-panel URL observed by the script:
   `chrome-extension://algfplhdbapdaoimggafkgmpmnadfppl/sidepanel.html`
 - Declared and granted APIs: `nativeMessaging`, `sidePanel`, `storage`

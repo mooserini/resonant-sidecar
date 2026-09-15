@@ -310,9 +310,9 @@ test('acceptance is bound to one review, digest, policy, action, and nonce', asy
 **Interfaces:**
 - Consumes: trusted presentation enum, trusted report path already contained in a finalized receipt, and nonce binding.
 - Produces: `showReviewDialog(model): Promise<DialogChoice>`, `openReviewReport(path)`, and `openChromeDeveloperProject()`.
-- Desktop target is fixed to project name `Chrome Developer`, project ID `78e19937-a254-4343-847d-171e0f1673d0`, and path `/Users/thomaskenny/chrome`.
+- Desktop target is fixed to project name `Chrome Developer`, project ID `78e19937-a254-4343-847d-171e0f1673d0`, and path `$HOME/chrome`.
 
-- [ ] **Step 1: Write failing tests proving candidate strings cannot reach AppleScript, failure text is exact, report paths must resolve beneath `review-receipts`, and desktop handoff invokes only `codex app /Users/thomaskenny/chrome`**
+- [ ] **Step 1: Write failing tests proving candidate strings cannot reach AppleScript, failure text is exact, report paths must resolve beneath `review-receipts`, and desktop handoff invokes only `codex app $HOME/chrome`**
 - [ ] **Step 2: Run `node --test test/macos-dialog.test.js test/desktop-handoff.test.js` and confirm missing-module failures**
 - [ ] **Step 3: Implement fixed `/usr/bin/osascript` scripts selected by trusted enum; parse only known button results and return the original nonce without allowing dialog text, buttons, paths, or verdicts from candidate data**
 
@@ -323,7 +323,7 @@ const FAILURE_MODEL = Object.freeze({
 });
 ```
 
-- [ ] **Step 4: Implement report opening with `/usr/bin/open <validated-report.md>` and desktop handoff with the absolute Codex path plus `app /Users/thomaskenny/chrome`; assert it never creates/selects a task, selects a model, sends text, or searches by task title**
+- [ ] **Step 4: Implement report opening with `/usr/bin/open <validated-report.md>` and desktop handoff with the absolute Codex path plus `app $HOME/chrome`; assert it never creates/selects a task, selects a model, sends text, or searches by task title**
 - [ ] **Step 5: Run focused tests, manually inspect one non-mutating sample dialog, dismiss it, run `npm run check`, and commit `feat: add fixed macOS review presentation`**
 
 ### Task 10: Lifecycle protocol and side-panel controls
@@ -403,6 +403,6 @@ const FAILURE_MODEL = Object.freeze({
 - [ ] Controlled post-activation failure returns to the exact previous digest and retains both failure and rollback evidence.
 - [ ] Chrome Dev exit terminates bootstrap, active host, and sidecar Codex descendants.
 - [ ] The failure UI contains no diagnostic prose; report and desktop handoff actions resolve only trusted destinations.
-- [ ] `codex app /Users/thomaskenny/chrome` opens the `Chrome Developer` project and starts no task or turn.
+- [ ] `codex app $HOME/chrome` opens the `Chrome Developer` project and starts no task or turn.
 - [ ] Existing comparison evidence remains present and unmodified.
 - [ ] `git remote -v` remains empty and no push occurs.

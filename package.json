@@ -2,6 +2,12 @@
   "name": "resonant-sidecar",
   "version": "0.1.0",
   "private": true,
+  "description": "Local Chrome Dev side panel for one durable agent conversation over native messaging.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mooserini/resonant-sidecar.git"
+  },
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",

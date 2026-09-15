@@ -163,7 +163,7 @@ The debugging destination is the pinned local desktop project **Chrome Developer
 The helper may invoke:
 
 ```sh
-codex app /Users/thomaskenny/chrome
+codex app $HOME/chrome
 ```
 
 This opens the desktop application at the project. It does not choose a model, create a task, submit a prompt, or start an agent turn. Inside that project, the human chooses an existing task for accumulated context or begins a clean task.

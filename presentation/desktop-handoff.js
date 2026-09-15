@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -7,8 +8,12 @@ import { sha256Bytes } from '../review/canonical-json.js';
 import { runPresentationProcess } from './macos-dialog.js';
 
 const DEFAULT_ROOT = fileURLToPath(new URL('../review-receipts', import.meta.url));
-const CODEX_DISCOVERY = '/Users/thomaskenny/.local/bin/codex';
-const PROJECT = Object.freeze({ name: 'Chrome Developer', id: '78e19937-a254-4343-847d-171e0f1673d0', path: '/Users/thomaskenny/chrome' });
+const CODEX_DISCOVERY = path.join(os.homedir(), '.local', 'bin', 'codex');
+const PROJECT = Object.freeze({
+  name: 'Chrome Developer',
+  id: '78e19937-a254-4343-847d-171e0f1673d0',
+  path: path.join(os.homedir(), 'chrome'),
+});
 const MAX_REPORT = 4 * 1024 * 1024;
 const MAX_EXECUTABLE = 512 * 1024 * 1024;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
@@ -110,7 +115,7 @@ export function createDesktopHandoff({ receiptRoot = DEFAULT_ROOT, codexPath = C
         if (executablePin) requireValue(executable === executablePin.path && same(held.metadata, executablePin.metadata) && held.digest === executablePin.digest);
         else executablePin = { path: executable, metadata: held.metadata, digest: held.digest };
         held.verify();
-        const running = runPresentationProcess(executable, ['app', '/Users/thomaskenny/chrome'], spawnChild, true);
+        const running = runPresentationProcess(executable, ['app', PROJECT.path], spawnChild, true);
         // Codex may print informational opening messages. Only its bounded
         // exit status is interpreted; stdout/stderr never become UI or authority.
         await running; held.verify(); requireValue(fs.realpathSync(codexPath) === executable);

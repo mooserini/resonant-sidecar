@@ -30,8 +30,8 @@ Chrome assigns unpacked IDs without a manifest `key` by SHA-256 of the absolute 
 
 | Path | Derived ID |
 | --- | --- |
-| `/Users/thomaskenny/Developer/Uncle-Russet/resonant-sidecar/extension` | `algfplhdbapdaoimggafkgmpmnadfppl` (live Agent-profile ID) |
-| `/Users/thomaskenny/Library/Application Support/Resonant Sidecar/extension` | `dcgoknilbkadmmiahhgefnckiiihgekp` (stable path; not yet loaded) |
+| `$HOME/Developer/Uncle-Russet/resonant-sidecar/extension` | `algfplhdbapdaoimggafkgmpmnadfppl` (live Agent-profile ID) |
+| `$HOME/Library/Application Support/Resonant Sidecar/extension` | `dcgoknilbkadmmiahhgefnckiiihgekp` (stable path; not yet loaded) |
 
 Using the live V1 ID as `--extension-id` would write a proposed origin that the stable path cannot present. After `--migrate`, destinations exist and a second migrate with a new ID is refused (`Migration destination exists`). Therefore the binding dry-run and `--migrate` use:
 
@@ -51,7 +51,7 @@ Taken 2026-09-15 while Chrome Dev PID 87164 was still running, at HEAD `f20d6c1`
 - preview `installHash`: `68e92fe0ced06a0ae9850f4738b6eab110d8f46c73845046b90e1d8191162e2d`
 - V1 launcher SHA-256: `949d8bd55a2a548f0f1589da8ed771644f655fd41efaae1a6430de24342c05bb`
 - V1 manifest SHA-256: `b512c743ed9dde0b9961af4a85c70cc7f5a0f724cbb56278de9680b58b84b704`
-- Codex executable (realpath of `~/.local/bin/codex`): `/Users/thomaskenny/.codex/packages/standalone/releases/0.153.2-aarch64-apple-darwin/bin/codex`
+- Codex executable (realpath of `~/.local/bin/codex`): `$HOME/.codex/packages/standalone/releases/0.153.2-aarch64-apple-darwin/bin/codex`
 
 Registration state in that preview: `unchanged-pending-stable-id-proof`. Stable-path identity: `unverified`.
 
