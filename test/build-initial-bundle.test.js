@@ -59,6 +59,7 @@ for (const [name, source, pattern] of [
   ['bare dynamic import', "await import('ambient-package');\n", /ambient|import graph/i],
   ['comment-separated static import', "import/* gap */ value from 'ambient-package';\n", /ambient|import graph/i],
   ['comment-separated dynamic import', "await import /* gap */ ('ambient-package');\n", /ambient|import graph/i],
+  ['dynamic import inside a template interpolation', "const load = `${await import('ambient-package')}`;\n", /ambient|import graph/i],
   ['non-literal dynamic import', "const target = './host.js'; await import(target);\n", /non-literal|import graph/i],
   ['unlisted relative dynamic import', "await import('./not-pinned.js');\n", /escapes|import graph/i],
 ]) test(`trusted closure rejects ${name}`, async () => {
@@ -69,6 +70,20 @@ for (const [name, source, pattern] of [
 test('trusted closure allows only explicit node builtins and pinned literal relatives', async () => {
   const files = repositoryFiles();
   files['bootstrap/host.js'] = "import { readFile } from 'node:fs/promises';\nexport { default as proxy } from './native-proxy.js';\nawait import('../review/canonical-json.js');\nvoid readFile;\n";
+  assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);
+});
+
+test('trusted closure ignores import-shaped text in comments and string literals', async () => {
+  const files = repositoryFiles();
+  files['bootstrap/host.js'] = [
+    "// import('ambient-comment-package')",
+    "const message = \"Unapproved candidate import'); then await load('ambient-string-package\";",
+    "const pattern = /import\\('ambient-regex-package'\\)/;",
+    "const template = `import('ambient-template-text')`;",
+    "import { readFile } from 'node:fs/promises';",
+    'void message; void pattern; void template; void readFile;',
+    '',
+  ].join('\n');
   assert.equal((await inspectInitialBundle({ repoRoot: '/repo', policy, git: fakeRepository(files).git })).declarationComparison.passed, true);
 });
 

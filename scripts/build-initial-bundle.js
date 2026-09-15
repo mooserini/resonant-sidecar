@@ -105,21 +105,175 @@ function artifacts(snapshot, names) {
     return Object.freeze({ relativePath, bytes: Buffer.from(item.bytes), mode: item.mode, sha256: sha256Bytes(item.bytes) });
   });
 }
+
+function moduleTokens(source, name) {
+  const tokens = [];
+  const identifierStart = character => /[A-Za-z_$]/.test(character ?? '');
+  const identifierPart = character => /[A-Za-z0-9_$]/.test(character ?? '');
+  const regexPrefix = new Set(['(', '[', '{', ',', ':', ';', '=', '!', '?', '&&', '||', '??', '=>', '+', '-', '*', '%', '&', '|', '^', '~', '<', '>']);
+  const regexKeyword = new Set(['case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'return', 'throw', 'typeof', 'void', 'yield', 'await']);
+  const failSyntax = detail => fail(`unparseable trusted module syntax at ${name}: ${detail}`);
+
+  function stringToken(start, quote) {
+    let index = start + 1;
+    let value = '';
+    let escaped = false;
+    while (index < source.length) {
+      const character = source[index];
+      if (character === quote) {
+        tokens.push({ type: 'string', value, escaped, start });
+        return index + 1;
+      }
+      if (character === '\\') {
+        escaped = true;
+        if (index + 1 >= source.length) failSyntax('unterminated string');
+        value += source.slice(index, index + 2);
+        index += 2;
+        continue;
+      }
+      if (character === '\n' || character === '\r') failSyntax('unterminated string');
+      value += character;
+      index += 1;
+    }
+    failSyntax('unterminated string');
+  }
+
+  function regexLiteral(start) {
+    let index = start + 1;
+    let characterClass = false;
+    while (index < source.length) {
+      const character = source[index];
+      if (character === '\\') { index += 2; continue; }
+      if (character === '\n' || character === '\r') failSyntax('unterminated regular expression');
+      if (character === '[') characterClass = true;
+      else if (character === ']') characterClass = false;
+      else if (character === '/' && !characterClass) {
+        index += 1;
+        while (identifierPart(source[index])) index += 1;
+        return index;
+      }
+      index += 1;
+    }
+    failSyntax('unterminated regular expression');
+  }
+
+  function canStartRegex() {
+    const previous = tokens.at(-1);
+    return !previous || (previous.type === 'punct' && regexPrefix.has(previous.value)) || (previous.type === 'identifier' && regexKeyword.has(previous.value));
+  }
+
+  function templateLiteral(start) {
+    let index = start + 1;
+    while (index < source.length) {
+      if (source[index] === '\\') { index += 2; continue; }
+      if (source[index] === '`') return index + 1;
+      if (source[index] === '$' && source[index + 1] === '{') {
+        index = scan(index + 2, true);
+        continue;
+      }
+      index += 1;
+    }
+    failSyntax('unterminated template');
+  }
+
+  function scan(start = 0, stopAtBrace = false) {
+    let index = start;
+    let braceDepth = 0;
+    while (index < source.length) {
+      const character = source[index];
+      if (/\s/.test(character)) { index += 1; continue; }
+      if (character === '/' && source[index + 1] === '/') {
+        index += 2;
+        while (index < source.length && !['\n', '\r'].includes(source[index])) index += 1;
+        continue;
+      }
+      if (character === '/' && source[index + 1] === '*') {
+        const end = source.indexOf('*/', index + 2);
+        if (end === -1) failSyntax('unterminated comment');
+        index = end + 2;
+        continue;
+      }
+      if (character === '/' && canStartRegex()) { index = regexLiteral(index); continue; }
+      if (character === "'" || character === '"') { index = stringToken(index, character); continue; }
+      if (character === '`') { index = templateLiteral(index); continue; }
+      if (identifierStart(character)) {
+        const begin = index++;
+        while (identifierPart(source[index])) index += 1;
+        tokens.push({ type: 'identifier', value: source.slice(begin, index), start: begin });
+        continue;
+      }
+      if (character === '{') braceDepth += 1;
+      if (character === '}') {
+        if (stopAtBrace && braceDepth === 0) return index + 1;
+        braceDepth -= 1;
+        if (braceDepth < 0) failSyntax('unmatched closing brace');
+      }
+      const pair = source.slice(index, index + 2);
+      const value = ['&&', '||', '??', '=>'].includes(pair) ? pair : character;
+      tokens.push({ type: 'punct', value, start: index });
+      index += value.length;
+    }
+    if (stopAtBrace) failSyntax('unterminated template expression');
+    return index;
+  }
+
+  scan();
+  return tokens;
+}
+
+function importSpecifiers(source, name) {
+  const tokens = moduleTokens(source, name);
+  const specifiers = [];
+  const literal = token => {
+    if (token?.type !== 'string' || token.escaped) fail(`non-literal or escaped import at ${name}`);
+    specifiers.push(token.value);
+  };
+  const statementEnd = start => {
+    let round = 0;
+    let square = 0;
+    let curly = 0;
+    for (let index = start; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (token.type !== 'punct') continue;
+      if (token.value === '(') round += 1;
+      else if (token.value === ')') round -= 1;
+      else if (token.value === '[') square += 1;
+      else if (token.value === ']') square -= 1;
+      else if (token.value === '{') curly += 1;
+      else if (token.value === '}') curly -= 1;
+      else if (token.value === ';' && round === 0 && square === 0 && curly === 0) return index;
+    }
+    return tokens.length;
+  };
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type !== 'identifier' || !['import', 'export'].includes(token.value) || tokens[index - 1]?.value === '.') continue;
+    if (token.value === 'import' && tokens[index + 1]?.value === '.') continue;
+    if (token.value === 'import' && tokens[index + 1]?.value === '(') {
+      literal(tokens[index + 2]);
+      if (tokens[index + 3]?.value !== ')') fail(`non-literal dynamic import at ${name}`);
+      index += 3;
+      continue;
+    }
+    if (token.value === 'import' && tokens[index + 1]?.type === 'string') {
+      literal(tokens[index + 1]);
+      index += 1;
+      continue;
+    }
+    const end = statementEnd(index + 1);
+    const from = tokens.slice(index + 1, end).findIndex(candidate => candidate.type === 'identifier' && candidate.value === 'from');
+    if (from !== -1) literal(tokens[index + 2 + from]);
+    else if (token.value === 'import') fail(`unparseable import at ${name}`);
+  }
+  return specifiers;
+}
+
 function assertClosedImports(snapshot, names) {
   const allowed = new Set(names);
-  const trivia = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*`;
-  const staticImport = new RegExp(String.raw`\b(?:import|export)${trivia}(?:[^'";]*?\bfrom${trivia})?(['"])([^'"]+)\1`, 'g');
-  const dynamicImport = new RegExp(String.raw`\bimport${trivia}\(([^)]*)\)`, 'g');
   for (const name of names.filter(value => value.endsWith('.js'))) {
     const source = snapshot.get(name).bytes.toString('utf8');
-    const specifiers = [];
-    for (const match of source.matchAll(staticImport)) specifiers.push(match[2]);
-    for (const match of source.matchAll(dynamicImport)) {
-      const literal = match[1].trim().match(/^(['"])([^'"]+)\1$/);
-      if (!literal) fail(`non-literal dynamic import at ${name}`);
-      specifiers.push(literal[2]);
-    }
-    for (const specifier of specifiers) {
+    for (const specifier of importSpecifiers(source, name)) {
       if (specifier.startsWith('node:')) continue;
       if (!specifier.startsWith('./') && !specifier.startsWith('../')) fail(`ambient import in trusted import graph at ${name}`);
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier));
