@@ -89,9 +89,16 @@ export class GrokAgentClient extends EventEmitter {
       throw new Error('A different Grok session is already open');
     }
 
-    const response = threadId === null
-      ? await this.#request('session/new', { cwd: this.#cwd, mcpServers: [] })
-      : await this.#request('session/resume', { cwd: this.#cwd, sessionId: threadId, mcpServers: [] });
+    let response;
+    if (threadId === null) {
+      response = await this.#request('session/new', { cwd: this.#cwd, mcpServers: [] });
+    } else {
+      try {
+        response = await this.#request('session/resume', { cwd: this.#cwd, sessionId: threadId, mcpServers: [] });
+      } catch {
+        response = await this.#request('session/new', { cwd: this.#cwd, mcpServers: [] });
+      }
+    }
 
     const openedThreadId = response?.sessionId;
     if (typeof openedThreadId !== 'string' || openedThreadId.length === 0) {
@@ -241,7 +248,6 @@ export class GrokAgentClient extends EventEmitter {
       }
       return;
     }
-    this.emit('event', { type: 'app-server.event', method, params });
   }
 
   #failAll(error) {

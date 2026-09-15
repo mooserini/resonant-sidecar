@@ -15,8 +15,23 @@ function parseArgs() {
   return parsed;
 }
 
+const BROWSER_EVENTS = new Set([
+  'session.ready',
+  'turn.started',
+  'assistant.delta',
+  'turn.completed',
+  'error',
+  'protocol.error',
+  'process.error',
+  'policy.violation',
+]);
+
 function send(message) {
-  process.stdout.write(encodeNativeMessage(message));
+  try {
+    process.stdout.write(encodeNativeMessage(message));
+  } catch {
+    process.stderr.write('outbound native message dropped\n');
+  }
 }
 
 function safeError(error) {
@@ -51,12 +66,15 @@ appServer.on('event', event => {
     send({ type: event.type, message: 'Native runtime unavailable' });
     return;
   }
+  if (!BROWSER_EVENTS.has(event.type)) return;
   send(event);
 });
 
 async function handleBrowserMessage(value) {
   // Only the stable trusted bootstrap may route review/refresh authority.
   // This replaceable child handles the unchanged conversation protocol alone.
+  // update.status is bootstrap-only; ignore it on a conversation-only host.
+  if (value && value.type === 'update.status') return;
   if (isLifecycleMessage(value)) throw new TypeError('Unsupported browser message type');
   const message = parseBrowserMessage(value);
 
