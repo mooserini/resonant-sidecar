@@ -1,0 +1,271 @@
+# Browser Session Continuity
+
+## Decision
+
+Resonant Sidecar treats the browser session—not the current webpage—as the durable relationship.
+
+Once the human connects a named browser lane, ordinary navigation and tab switching must not require another human connection handshake. Sidecar preserves the conversation and browser-lane session, refreshes disposable page context when the active document changes, and reports only genuine loss of browser control as a disconnection.
+
+This is a product requirement and lifecycle model. It is not evidence that every part of the flow is implemented by the current prototype.
+
+## Why this matters
+
+A mature browser sidecar remains present while the human browses. The panel does not disappear, reset the conversation, or ask the human to reconnect whenever a page navigates. That continuity comes from separating long-lived browser relationships from short-lived document state.
+
+```text
+Browser window
+├── Side panel UI                         long-lived
+├── Extension coordinator                 restartable
+├── Native-host / agent transport         long-lived connection
+├── Browser-control session               long-lived per lane or tab
+└── Current document context              replaced on navigation
+```
+
+Navigation may destroy a document's DOM, frames, and JavaScript execution contexts. It must not implicitly destroy the Sidecar conversation, Hermes session, native-host channel, or named browser-lane connection.
+
+## Trust ownership
+
+Chrome owns and mediates the human's relationship with the browser. The human is already authorized to navigate, open and close tabs, change pages, and choose which browsing surface is active. Sidecar should accompany that ordinary browsing lifecycle through Chrome's supported extension surfaces rather than treating every navigation as a new trust ceremony.
+
+Sidecar owns the relationship between its interface and the selected agent or agents. That includes:
+
+- establishing and recovering the local agent transport;
+- preserving agent and conversation identity;
+- routing human messages and agent lifecycle events;
+- tracking which browser lane and target are current;
+- replacing page-specific context when Chrome reports a target or document change;
+- reporting genuine loss of agent or browser connectivity truthfully.
+
+These relationships must remain distinct:
+
+```text
+human ↔ Chrome/browser          browsing and target selection
+human ↔ Sidecar                 companion presence and interaction
+Sidecar ↔ agent                 session, transport, and event continuity
+agent ↔ page capability         separately bounded observation or action
+```
+
+Following the active tab is a continuity function. It does not, by itself, grant the agent permission to read page contents, inspect cookies or history, use credentials, or act on the page. Those capabilities remain governed by the supported browser-control transport and its explicit permission and approval boundaries.
+
+A target-change signal should carry only the identity and lifecycle information required to follow the human's browsing context. It must not silently broaden the data available to Sidecar or the agent.
+
+The governing trust distinction is:
+
+> Sidecar does not need to reauthorize its presence when the human changes pages, and the agent does not inherit the human's unrestricted browser authority merely because Sidecar remains present.
+
+## Identity and lifetime model
+
+Sidecar must keep the following identities distinct:
+
+| Identity | Meaning | Expected lifetime |
+|---|---|---|
+| `browserLaneId` | Named browser route such as `chrome-stable` or `chrome-dev` | Until explicit disconnect, browser exit, or transport loss |
+| `windowId` | Browser window containing the browsing surface and panel | Until the window closes or is replaced |
+| `tabId` | Stable browser identity for a tab | Across ordinary top-level navigation; until close or replacement |
+| `documentEpoch` | One loaded top-level document and its frame/execution-context graph | Until navigation or document replacement |
+
+`documentEpoch` is a logical Sidecar concept; its implementation may use browser lifecycle events, CDP loader/frame identifiers, or another verified generation marker.
+
+## Durable and disposable state
+
+| State | Survives navigation in the same tab? | Survives switching tabs? |
+|---|---:|---:|
+| Sidecar conversation | Yes | Yes |
+| Hermes session/thread | Yes | Yes |
+| Native-host connection | Yes | Yes |
+| Named browser-lane connection | Yes | Yes |
+| Browser window identity | Yes | Usually |
+| Selected tab identity | Yes | Changes to the newly active tab |
+| DOM and frame handles | No | No; target-specific |
+| JavaScript execution contexts | No | No; target-specific |
+| Page snapshot and semantic cache | No | No; refresh for the active target |
+| In-flight operation bound to the old document | Reconcile or stop | Reconcile, pause, or stop by explicit policy |
+
+No object originating inside a document may be assumed valid after `documentEpoch` changes.
+
+## Lifecycle flows
+
+### 1. Connect a browser lane
+
+1. The human selects or authorizes a named browser lane.
+2. Sidecar establishes the local Sidecar-to-Hermes relationship.
+3. Hermes establishes or discovers the supported browser-control transport for that lane.
+4. Sidecar records connection state without treating a URL as the connection identity.
+5. Sidecar reports the lane as ready only after the transport is verified.
+
+Human-visible handshake scope:
+
+```text
+human approval → browser lane
+```
+
+Not:
+
+```text
+human approval → URL → every subsequent URL → every subsequent document
+```
+
+### 2. Navigate within the active tab
+
+Example:
+
+```text
+Tab 47: example.com → wikipedia.org
+```
+
+Expected behavior:
+
+1. The tab retains its browser identity when the browser does so.
+2. The browser or control transport reports navigation/document replacement.
+3. Sidecar increments or replaces `documentEpoch`.
+4. Sidecar invalidates DOM, frame, execution-context, and page-snapshot state.
+5. An operation bound to the old document is stopped or reconciled according to its contract.
+6. Hermes refreshes page context before the next page-bound operation.
+7. The panel, conversation, Hermes session, and browser-lane connection remain intact.
+
+The user is not asked to reconnect.
+
+### 3. Switch active tabs
+
+Example:
+
+```text
+Active tab: 47 → 83
+```
+
+Expected behavior:
+
+1. The browser-facing coordinator observes the active-target change.
+2. Sidecar updates the selected tab identity without changing the browser lane.
+3. Hermes reuses an existing target session or selects/attaches to the new target through the supported transport.
+4. Sidecar obtains fresh document context for the new target.
+5. The panel and conversation remain continuous.
+
+Target selection is internal lifecycle work, not a new human handshake.
+
+### 4. Create, close, or replace a tab
+
+- **Create:** observe the new identity; do not select it unless the browser makes it active or the human explicitly chooses it.
+- **Close:** invalidate all tab- and document-scoped state; select the browser's next active tab when available.
+- **Replace:** transfer only state whose contract explicitly survives replacement. Never transfer document handles.
+- **No usable target:** keep the browser lane connected and show a bounded `no active page` state rather than claiming transport failure.
+
+### 5. Close and reopen the panel
+
+The panel UI may be destroyed when closed. Conversation and browser continuity must therefore not depend exclusively on in-memory variables in the panel page.
+
+On reopen:
+
+1. reconnect to the local coordinator;
+2. restore the durable Hermes session/thread identifier;
+3. read the current browser-lane and active-target state;
+4. reconstruct the visible lifecycle state;
+5. avoid replaying completed operations as though they were new.
+
+The current prototype closes its native-host process when the panel disconnects and resumes conversation by stored thread identifier. A future implementation may retain a longer-lived coordinator, but that change must remain explicit and reviewed.
+
+### 6. Genuine connection loss
+
+A new connection or visible recovery flow is appropriate when:
+
+- the browser process exits;
+- the native-host port is destroyed;
+- the MCP or CDP transport disconnects;
+- the extension or controlling component reloads;
+- another debugger or browser tool takes exclusive control;
+- the selected browser lane becomes unavailable or incompatible;
+- the human explicitly disconnects.
+
+Sidecar must distinguish these events from navigation. `Page changed` is not synonymous with `browser disconnected`.
+
+## State model
+
+A minimal observable state hierarchy is:
+
+```text
+browser disconnected
+  └── connecting
+        └── browser connected
+              ├── no active page
+              └── active target
+                    ├── document loading
+                    ├── document ready
+                    ├── operation running
+                    ├── operation completed
+                    ├── operation failed
+                    └── operation stopped
+```
+
+A target or document transition may move the inner state without moving the browser lane back to `connecting`.
+
+## Current permission boundary
+
+The current Sidecar extension declares only:
+
+```text
+nativeMessaging
+sidePanel
+storage
+```
+
+It does not currently declare `tabs`, `debugger`, content scripts, or host permissions. This document does not authorize adding them.
+
+Mature browser companions commonly combine side-panel persistence, active-tab events, navigation events, a persistent native-host port, and a browser-control attachment keyed to tab identity. Some vendor products also have privileged browser integration unavailable to ordinary extensions.
+
+Resonant Sidecar should first prove the supported Hermes and Chrome DevTools MCP path. Any new Chrome permission requires a demonstrated gap, a separate reviewed decision, and a plain-language account of what becomes observable or controllable.
+
+## Known integration question
+
+The narrow current architecture has two identifier domains:
+
+```text
+Chrome extension                 browser-control transport
+----------------                 -------------------------
+windowId / tabId                 CDP targetId / sessionId
+```
+
+True automatic following across manual tab switches requires a verified way to select the corresponding browser-control target. It is not yet proven that the current permission surface and Chrome DevTools MCP expose a reliable mapping or foreground-target signal.
+
+This is a bounded interoperability question for the companion Lab:
+
+1. Keep one named browser lane connected.
+2. Navigate repeatedly within one tab and confirm no transport re-handshake is required.
+3. Switch among multiple tabs manually.
+4. Observe which identifiers and lifecycle events are available to Sidecar and Chrome DevTools MCP.
+5. Determine whether active-target selection can be derived without new extension permissions.
+6. Record unsupported or ambiguous cases rather than guessing.
+7. Consider additional permission or transport designs only if the supported path cannot satisfy the requirement.
+
+## Acceptance criteria
+
+Browser-session continuity is demonstrated only when the same Sidecar build can show all of the following:
+
+- A named browser lane connects once and remains connected across multiple top-level navigations.
+- Navigation invalidates old document handles and refreshes page context without resetting the conversation.
+- Switching tabs updates the active target without a new human handshake.
+- Closing a tab produces a bounded target transition, not a false browser-disconnected state.
+- Closing and reopening the panel restores truthful conversation and connection state.
+- An operation bound to an obsolete document cannot silently continue against a replacement document.
+- Genuine transport loss is visible and recoverable.
+- Chrome Stable and Chrome Dev exercise the same Sidecar commit.
+- No unapproved Chrome permission is added to make the test pass.
+- Results distinguish `pass`, `fail`, `not run`, and `unverified`.
+
+## Evidence and clean-room boundary
+
+Chrome documents that an extension side panel can remain open while navigating between tabs. Chrome also documents that `runtime.connectNative()` keeps a native-messaging host process running until its port is destroyed, unlike one-shot `sendNativeMessage()` calls.
+
+Comparative inspection of a locally installed mature sidecar showed the expected product pattern: a persistent native-host connection with reconnect states, active-tab and navigation listeners, tab-keyed browser-control attachment, and invalidation of page-specific state after navigation. That observation informs this lifecycle model only. No vendor source, compiled asset, visual expression, or private protocol is incorporated into Resonant Sidecar.
+
+References:
+
+- [Chrome Side Panel API](https://developer.chrome.com/docs/extensions/reference/api/sidePanel)
+- [Chrome Native Messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
+- [Chrome Tabs API](https://developer.chrome.com/docs/extensions/reference/api/tabs)
+- [Chrome Debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger)
+
+## Governing rule
+
+> Preserve the durable browser relationship; replace the disposable document context.
+
+A page change is ordinary lifecycle churn. It must not be promoted into a ceremony the human has to repeat.
