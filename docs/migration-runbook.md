@@ -51,8 +51,8 @@ not name Chrome Stable, a network endpoint, or a working-tree
 
 The plan format and selected review policy are V2. Bundle manifest format stays
 `schemaVersion: 1`; these versions describe different contracts. Its exact
-49-source control inventory contains 38 trusted-bootstrap files, 8
-stable-extension files, and 3 installer files. The sealed bootstrap has 40 files
+50-source control inventory contains 39 trusted-bootstrap files, 8
+stable-extension files, and 3 installer files. The sealed bootstrap has 41 files
 including generated `package.json` and `runtime-entry.js`. All relative imports
 close inside their declared graph. The Node and browser Chrome contracts must
 have identical bytes and one shared digest; policy, Chrome schema, adapter, and
