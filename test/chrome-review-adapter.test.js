@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { bridgeFixture, NOW, RAW, observations, until } from './fixtures/chrome-bridge.js';
 import { ChromeReviewBridge, parseChromeSettlement } from '../review/chrome-review-bridge.js';
-import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { ChromeReviewJournal } from './fixtures/runtime-components.js';
 import { buildChromeReviewPrompt, CHROME_REVIEW_PROMPT, CHROME_REVIEW_SCHEMA } from '../extension/chrome-review-contract.js';
 import { sha256Json, sha256Bytes } from '../review/canonical-json.js';
 import { createChromeReviewAdapter } from '../extension/chrome-review-adapter.js';

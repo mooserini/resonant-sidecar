@@ -12,10 +12,10 @@ import { CHROME_REVIEW_PROMPT, CHROME_REVIEW_SCHEMA } from '../extension/chrome-
 import { createLifecycleRouter } from '../native-host/sidecar-protocol.js';
 import { NativeMessageDecoder, encodeNativeMessage } from '../native-host/native-framing.js';
 import { ChromeReviewBridge } from '../review/chrome-review-bridge.js';
-import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { ChromeReviewJournal, VersionStore } from './fixtures/runtime-components.js';
+import { runtimeLockHelperInvocation } from '../bootstrap/runtime-lock-core.js';
 import { ReviewCoordinator } from '../review/review-coordinator.js';
 import { ReceiptStore } from '../review/receipt-store.js';
-import { VersionStore } from '../bootstrap/version-store.js';
 import { DecisionNonces } from '../review/decision-nonce.js';
 import { loadReviewPolicy, reviewPolicyDigest } from '../review/policy-registry.js';
 import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
@@ -101,14 +101,14 @@ async function harness(t, scenario = {}) {
   t.mock.method(globalThis, 'fetch', forbid('fetch/fallback'));
   t.mock.method(net.Socket.prototype, 'connect', forbid('connect/fallback'));
   t.mock.method(net.Server.prototype, 'listen', forbid('listener'));
-  const lockSource = `exit 70 if $^V ne v5.34.1; open(my $lock, '+<&=3') or exit 71; flock($lock, LOCK_EX) or exit 72; print STDOUT "locked\\n" or exit 73;`;
+  const lockInvocation = runtimeLockHelperInvocation();
   const processMocks = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'].map(name => {
     const original = childProcess[name];
     return t.mock.method(childProcess, name, (...args) => {
-      // The unchanged VersionStore uses this exact kernel-lock helper on the
+      // The injected test provider uses this exact kernel-lock helper on the
       // test-owned runtime descriptor. All model/command launch paths fail.
-      if (name === 'spawn' && args[0] === '/usr/bin/perl' && args[2]?.cwd === f.root && args[2]?.shell === false &&
-        JSON.stringify(args[1]) === JSON.stringify(['-MFcntl=:flock', '-e', lockSource])) return original(...args);
+      if (name === 'spawn' && args[0] === lockInvocation.command && args[2]?.cwd === lockInvocation.cwd && args[2]?.shell === false &&
+        JSON.stringify(args[1]) === JSON.stringify(lockInvocation.args)) return original(...args);
       return forbid(`process/${name}`)();
     });
   });

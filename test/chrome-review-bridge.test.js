@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { ChromeReviewJournal } from './fixtures/runtime-components.js';
 import { ChromeReviewBridge, parseChromeSettlement } from '../review/chrome-review-bridge.js';
 import { bridgeFixture, observations, RAW, NOW, OTHER, until, wireBinding } from './fixtures/chrome-bridge.js';
 import { buildChromeReviewRequest } from '../review/semantic-evidence.js';

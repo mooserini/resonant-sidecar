@@ -43,11 +43,12 @@ function validate(record) {
 /** This is crash bookkeeping, not a receipt or model-output store. The trusted
  * caller reconciles the permanent receipt chain before markReceipted. */
 export class ChromeReviewJournal {
-  #project; #root; #file; #restart; #record = null; #recovered = false;
-  constructor({ projectRoot, restartId }) {
+  #project; #root; #file; #restart; #lock; #record = null; #recovered = false;
+  constructor({ projectRoot, restartId, withRuntimeLock: lock = withRuntimeLock }) {
+    if (typeof lock !== 'function') fail();
     this.#project = projectRoot; this.#root = path.join(projectRoot, 'runtime'); this.#file = path.join(this.#root, 'chrome-review-pending.json');
     if (typeof restartId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(restartId)) fail();
-    this.#restart = restartId;
+    this.#restart = restartId; this.#lock = lock;
   }
   #prepare() {
     concrete(this.#project);
@@ -82,7 +83,7 @@ export class ChromeReviewJournal {
   }
   async #locked(action) {
     const device = this.#prepare();
-    return withRuntimeLock({ file: path.join(this.#root, '.chrome-review-lock.json'), device }, async () => {
+    return this.#lock({ file: path.join(this.#root, '.chrome-review-lock.json'), device }, async () => {
       if (this.#prepare() !== device) fail();
       this.#record = this.#read(device); return action(device);
     });

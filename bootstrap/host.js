@@ -34,7 +34,7 @@ export async function runBootstrap({ store, nodePath, codexPath, workspace, user
   const channelId = randomUUID(), restartId = randomUUID();
   const invocationIdFactory = chromeReview?.invocationIdFactory ?? randomUUID;
   if (typeof invocationIdFactory !== 'function') throw new TypeError('Trusted invocation ID factory required');
-  const chromeJournal = chromeReview === null ? null : new ChromeReviewJournal({ projectRoot: chromeReview.projectRoot, restartId });
+  const chromeJournal = chromeReview === null ? null : new ChromeReviewJournal({ projectRoot: chromeReview.projectRoot, restartId, withRuntimeLock: chromeReview.withRuntimeLock });
   if (chromeJournal) await chromeJournal.recover();
   const resume = resumeActivation === null ? null : snapshotRecoveryBinding(resumeActivation);
   if (resume) await store.resumePendingActivation(resume);

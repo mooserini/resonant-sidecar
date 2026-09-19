@@ -2,8 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, chmod, symlink, mkdir, lstat } from 'node:fs/promises';
 import path from 'node:path';
-import { VersionStore } from '../bootstrap/version-store.js';
+import { VersionStore } from './fixtures/runtime-components.js';
 import { runtimeFixture, decisionFor, consumer } from './fixtures/runtime.js';
+
+test('uses the supplied runtime lock provider instead of the production default', async t => {
+  const f = await runtimeFixture(t); const staged = await f.stage('injected-lock');
+  const withRuntimeLock = async () => { throw new Error('injected runtime lock reached'); };
+  const store = new VersionStore({ projectRoot: f.projectRoot, withRuntimeLock });
+  await assert.rejects(() => store.installVersion(staged), /injected runtime lock reached/);
+});
 
 test('install seals exact staged bytes and activation resolves only a consumed matching decision', async t => {
   const f = await runtimeFixture(t); const staged = await f.stage('first');

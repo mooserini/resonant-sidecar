@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { recoverInterruptedActivation } from '../bootstrap/recovery-state.js';
-import { VersionStore } from '../bootstrap/version-store.js';
+import { VersionStore } from './fixtures/runtime-components.js';
 import { runtimeFixture, decisionFor, consumer } from './fixtures/runtime.js';
 import { canonicalJson } from '../review/canonical-json.js';
 import { spawnSync } from 'node:child_process';
@@ -44,7 +44,7 @@ for (let boundary = 1; boundary <= 7; boundary++) {
     await store.installVersion(next);
     // Intercept the real filesystem syscall in a disposable child. No fault
     // injection hooks or altered persistence paths exist in production.
-    const script = `import fs from 'node:fs'; import { VersionStore } from ${JSON.stringify(new URL('../bootstrap/version-store.js', import.meta.url).href)};
+    const script = `import fs from 'node:fs'; import { VersionStore } from ${JSON.stringify(new URL('./fixtures/runtime-components.js', import.meta.url).href)};
       const rename=fs.renameSync;let count=0;fs.renameSync=(...args)=>{rename(...args);if(++count===${boundary})process.kill(process.pid,'SIGKILL');};
       const store=new VersionStore({projectRoot:${JSON.stringify(f.projectRoot)},consumeDecision:async d=>({...d,consumed:true})});
       await store.activate(${JSON.stringify(decisionFor(next, 'm'.repeat(32)))});`;
@@ -62,7 +62,7 @@ for (let boundary = 1; boundary <= 7; boundary++) {
 test('atomic publication syncs each source before rename and its destination directory afterward', async t => {
   const f = await runtimeFixture(t); const staged = await f.stage('first');
   const script = `import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
-    import { VersionStore } from ${JSON.stringify(new URL('../bootstrap/version-store.js', import.meta.url).href)};
+    import { VersionStore } from ${JSON.stringify(new URL('./fixtures/runtime-components.js', import.meta.url).href)};
     const synced=new Set();let awaiting=null,count=0;const sync=fs.fsyncSync,rename=fs.renameSync;
     fs.fsyncSync=fd=>{sync(fd);const s=fs.fstatSync(fd);synced.add(s.ino);if(s.ino===awaiting)awaiting=null;};
     fs.renameSync=(from,to)=>{assert.equal(awaiting,null);assert.ok(synced.has(fs.lstatSync(from).ino),'source was not fsynced');rename(from,to);awaiting=fs.lstatSync(path.dirname(to)).ino;count++;};

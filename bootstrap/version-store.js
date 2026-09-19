@@ -65,12 +65,13 @@ function completionWitness(binding, authorization) {
 }
 
 export class VersionStore {
-  #project; #root; #device; #consume; #verifyConsumed; #clock; #receipts = null; #recovered = null; #pending = null; #runtimeGuard = null;
-  constructor({ projectRoot, consumeDecision, verifyConsumedDecision, clock = Date.now } = {}) {
+  #project; #root; #device; #consume; #verifyConsumed; #clock; #lock; #receipts = null; #recovered = null; #pending = null; #runtimeGuard = null;
+  constructor({ projectRoot, consumeDecision, verifyConsumedDecision, clock = Date.now, withRuntimeLock: lock = withRuntimeLock } = {}) {
+    if (typeof lock !== 'function') fail('Runtime lock provider required');
     this.#project = concrete(projectRoot);
     this.#root = path.join(projectRoot, 'runtime');
     this.#consume = consumeDecision;
-    this.#verifyConsumed = verifyConsumedDecision; this.#clock = clock;
+    this.#verifyConsumed = verifyConsumedDecision; this.#clock = clock; this.#lock = lock;
   }
   #prepare() {
     concrete(this.#project);
@@ -84,7 +85,7 @@ export class VersionStore {
   }
   async #locked(fn) {
     this.#prepare();
-    return withRuntimeLock({ file: path.join(this.#root, '.store-lock.json'), device: this.#device }, async () => {
+    return this.#lock({ file: path.join(this.#root, '.store-lock.json'), device: this.#device }, async () => {
       this.#prepare(); syncDir(this.#root); return fn();
     });
   }

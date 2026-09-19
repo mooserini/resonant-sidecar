@@ -14,6 +14,8 @@
     "check": "node --check native-host/*.js && node --check extension/*.js && node --check scripts/*.js && node --test test/*.test.js",
     "smoke:real": "node test/real-app-server-smoke.js",
     "check:chrome-review": "node --test test/chrome-semantic-review.integration.test.js test/review-runtime-races.test.js",
+    "check:runtime-lock": "node --test test/runtime-lock-identity.test.js test/runtime-lock.platform.js",
+    "check:release": "npm run check && npm run check:runtime-lock",
     "verify:receipts": "node scripts/verify-receipt-chain.js"
   },
   "engines": {

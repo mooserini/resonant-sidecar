@@ -10,11 +10,11 @@ import { sha256Bytes } from '../review/canonical-json.js';
 import { TRUSTED_BOOTSTRAP_FILES, inspectInitialBundle, materializeInitialBundle } from '../scripts/build-initial-bundle.js';
 import { loadReviewPolicy } from '../review/policy-registry.js';
 
-test('V2 inspector closes the exact frozen 38-file bootstrap and eight-file extension graph', async () => {
+test('V2 inspector closes the exact frozen 39-file bootstrap and eight-file extension graph', async () => {
   const v2 = loadReviewPolicy(2);
   const stable = v2.trustedControlPaths.filter(file => file.startsWith('extension/'));
   const bootstrap = v2.trustedControlPaths.filter(file => !file.startsWith('extension/') && !file.startsWith('scripts/'));
-  assert.equal(bootstrap.length, 38);
+  assert.equal(bootstrap.length, 39);
   assert.deepEqual(TRUSTED_BOOTSTRAP_FILES, bootstrap);
   const files = Object.fromEntries(await Promise.all([...new Set([...v2.trustedControlPaths, ...v2.approvedBundlePaths])].map(async file => [file, await readFile(new URL(`../${file}`, import.meta.url))])));
   const result = await inspectInitialBundle({ repoRoot: '/repo', policy: v2, git: fakeRepository(files).git });

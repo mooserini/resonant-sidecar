@@ -30,14 +30,23 @@ Stale temporary files are retained and never treated as versions or authority.
 This macOS implementation acquires `flock` through a short-lived fixed
 `/usr/bin/perl -MFcntl=:flock -e <trusted source>` helper, then retains the shared
 open-file description in the Node parent after the helper exits. No shell,
-package install, candidate source, or ambient environment is involved. The
-interpreter must be a concrete root-owned executable, version 5.34.1, with
-SHA-256 `85e5621137742a37be052f58800372b2005f91f609ad55019832214b5d9e61bc`.
-Identity is checked before and after invocation; exact fixed output and exit
-status are checked. Missing/mismatched interpreter, invalid file custody, or
-15-second acquisition timeout fails closed. An OS update changing the pinned
-Perl binary requires a separate trusted-bootstrap update. Other platforms are
-unsupported by this lock implementation.
+package install, candidate source, or ambient environment is involved. Before
+and after helper execution, the provider requires a concrete root-owned,
+non-symlinked, safely permissioned `/usr/bin/perl` and verifies the Apple
+anchor plus designated identifier `com.apple.perl` with fixed
+`/usr/bin/codesign` arguments. The helper's bounded `Fcntl::flock` protocol,
+fixed output, and exit status prove compatibility; a Perl version or byte hash
+is evidence rather than authority. Invalid provenance, changed path/inode/device,
+invalid lock-file custody, helper output drift, or a 15-second acquisition
+timeout fails closed. Other platforms are unsupported by this provider.
+
+`npm run check` uses an explicitly injected, kernel-backed provider for ordinary
+application tests, so those tests exercise real cross-process exclusion without
+revalidating host-specific Apple identity. `npm run check:runtime-lock` exercises
+the production identity provider on supported macOS. `npm run check:release`
+requires both lanes. The exact retired v1 implementation and rationale are
+preserved under `archive/fort-knox-runtime-lock-v1/` and
+`docs/history/fort-knox-runtime-lock-v1.md`; neither is an active import.
 
 `activate` returns `pending-verification`. Only that store instance can resolve
 the pending host for the trusted coordinator's live verification.
