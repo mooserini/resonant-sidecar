@@ -1,5 +1,13 @@
 # Resonant Sidecar
 
+> [!IMPORTANT]
+> **Repository role: canonical active product.** Resonant Sidecar owns the
+> user-facing local agent workbench, product behavior, installation, releases,
+> and roadmap. **Hermes Browser Interop Lab** is its companion testing and
+> research repository: it hosts narrow page-scoped fixtures, browser-channel
+> compatibility experiments, and the preserved design history. The lab is not
+> a second product implementation.
+
 Experimental local prototype. MIT licensed. Not affiliated with OpenAI, Google,
 or any agent vendor.
 
@@ -176,9 +184,10 @@ operator machine. They are not part of this repository.
 ## Related public lab
 
 The consent-gated Chrome experiment that started this work is
-[hermes-browser-interop-lab](https://github.com/mooserini/hermes-browser-interop-lab).
-That repository is a page-scoped, read-only harness (`activeTab` + `scripting`,
-no host permissions) plus a draft four-level trust model. Resonant Sidecar is
-the **conversational** seat from that model: the agent is present beside the
-page with **no page access**. It is not a merge of the two projects and does
-not inherit the lab's `activeTab` / `scripting` permissions.
+**Hermes Browser Interop Lab**. That companion repository is a page-scoped,
+read-only harness (`activeTab` + `scripting`, no host permissions), browser
+compatibility laboratory, and historical ledger. Resonant Sidecar is the
+canonical product and the **conversational** seat from the lab's trust model:
+the agent is present beside the page with **no page access**. It is not a merge
+of the two projects and does not inherit the lab's `activeTab` / `scripting`
+permissions.
