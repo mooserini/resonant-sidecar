@@ -4,7 +4,7 @@
 
 Resonant Sidecar treats the browser session—not the current webpage—as the durable relationship.
 
-Once the human connects a named browser lane, ordinary navigation and tab switching must not require another human connection handshake. Sidecar preserves the conversation and browser-lane session, refreshes disposable page context when the active document changes, and reports only genuine loss of browser control as a disconnection.
+Once the human connects a named browser lane, ordinary navigation and tab switching must not require another human connection handshake. Sidecar preserves the conversation and browser-lane session, refreshes disposable page context when the active document changes, reports loss of a browser-control capability as scoped degradation, and reserves `disconnected` for loss of the Sidecar-to-agent channel.
 
 This is a product requirement and lifecycle model. It is not evidence that every part of the flow is implemented by the current prototype.
 
@@ -164,9 +164,15 @@ On reopen:
 
 The current prototype closes its native-host process when the panel disconnects and resumes conversation by stored thread identifier. A future implementation may retain a longer-lived coordinator, but that change must remain explicit and reviewed.
 
-### 6. Genuine connection loss
+### 6. Genuine connection loss and capability degradation
 
-A new connection or visible recovery flow is appropriate when:
+Sidecar has more than one continuity channel. Losing one channel must not erase
+healthy state owned by another. In particular, a browser-control failure may
+remove page inspection or interaction while the local coordinator,
+conversation, and visible failure receipt remain available.
+
+A new connection or visible recovery flow is appropriate for the affected
+channel when:
 
 - the browser process exits;
 - the native-host port is destroyed;
@@ -176,27 +182,48 @@ A new connection or visible recovery flow is appropriate when:
 - the selected browser lane becomes unavailable or incompatible;
 - the human explicitly disconnects.
 
-Sidecar must distinguish these events from navigation. `Page changed` is not synonymous with `browser disconnected`.
+Recovery is capability-scoped:
+
+- **Valid and compatible change:** append a receipt and continue without user
+  authentication.
+- **Valid but materially different change:** pause only the unexplained or
+  hazardous new authority lane, explain the delta, and require acknowledgment
+  before enabling it.
+- **Invalid, incomplete, or incompatible state:** stop only the affected
+  capability, preserve unrelated healthy functions, and offer the applicable
+  retry, revert, review, repair, or disconnect path.
+
+Only loss of the local Sidecar-to-agent channel makes the conversation itself
+disconnected. Sidecar must distinguish all of these events from navigation.
+`Page changed` is not synonymous with `browser disconnected`, and `browser
+control unavailable` is not synonymous with `Sidecar unavailable`.
 
 ## State model
 
 A minimal observable state hierarchy is:
 
 ```text
-browser disconnected
-  └── connecting
-        └── browser connected
-              ├── no active page
-              └── active target
-                    ├── document loading
-                    ├── document ready
-                    ├── operation running
-                    ├── operation completed
-                    ├── operation failed
-                    └── operation stopped
+Sidecar-to-agent channel
+  ├── disconnected
+  ├── connecting
+  └── connected
+        └── browser-control capability
+              ├── unavailable / incompatible
+              ├── reconnecting
+              └── available
+                    ├── no active page
+                    └── active target
+                          ├── document loading
+                          ├── document ready
+                          ├── operation running
+                          ├── operation completed
+                          ├── operation failed
+                          └── operation stopped
 ```
 
-A target or document transition may move the inner state without moving the browser lane back to `connecting`.
+A target or document transition may move the inner state without reconnecting
+the browser-control capability. A browser-control failure may move that
+capability to `unavailable` without disconnecting the Sidecar-to-agent channel.
 
 ## Current permission boundary
 

@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Resonant Sidecar — Agent Workbench</title>
+<link rel="icon" href="data:,">
+<style>
+@layer reset, base, components, states;
+@layer reset {
+  html { box-sizing: border-box; }
+  *, *::before, *::after { box-sizing: inherit; }
+  body, h1, h2, h3, p, ul, ol { margin: 0; }
+  ul, ol { padding: 0; list-style: none; }
+  button, textarea, select { font: inherit; }
+}
+@layer base {
+  :root {
+    color-scheme: dark;
+    --bg: #111211;
+    --surface: #191a19;
+    --raised: #222320;
+    --raised-2: #2a2925;
+    --ink: #f3ede5;
+    --muted: #a79f96;
+    --line: #3c3a35;
+    --copper: #b18868;
+    --magenta: #c166c0;
+    --green: #75c58c;
+    --yellow: #e8c66a;
+    --red: #e57972;
+  }
+  body { min-block-size: 100dvh; background: var(--bg); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif; line-height: 1.4; }
+  button, textarea, select { color: inherit; }
+  :where(button, textarea, select):focus-visible { outline: 2px solid var(--magenta); outline-offset: 2px; }
+}
+@layer components {
+  .app { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-block-size: 100dvh; max-inline-size: 34rem; margin-inline: auto; border-inline: 1px solid var(--line); background: var(--surface); }
+  .topbar { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .75rem; padding: .7rem .8rem; border-block-end: 1px solid var(--line); }
+  .title-line { display: flex; align-items: center; gap: .55rem; }
+  h1 { font-size: .92rem; letter-spacing: -.01em; }
+  .live { inline-size: .45rem; block-size: .45rem; border-radius: 50%; background: var(--green); }
+  .agent-select { min-block-size: 2rem; padding: .3rem .5rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--raised); }
+  .telemetry { display: grid; grid-template-columns: 1fr 1fr; border-block-end: 1px solid var(--line); background: var(--raised); }
+  .metric { min-inline-size: 0; padding: .58rem .75rem; }
+  .metric + .metric { border-inline-start: 1px solid var(--line); }
+  .metric-label { color: var(--muted); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .metric-value { margin-block-start: .18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .75rem; }
+  .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 8.2rem; min-block-size: 0; }
+  .conversation { overflow-y: auto; padding: .85rem; }
+  .messages { display: grid; gap: .9rem; }
+  .message { display: grid; gap: .3rem; }
+  .who { color: var(--muted); font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+  .copy { font-size: .82rem; text-wrap: pretty; }
+  .user .copy { padding: .65rem .7rem; border-inline-start: 2px solid var(--copper); background: color-mix(in oklab, var(--raised), transparent 10%); }
+  .assistant .copy { padding-inline-end: .2rem; }
+  .approval { margin-block-start: .65rem; padding: .65rem; border: 1px solid color-mix(in oklab, var(--yellow), var(--line) 58%); border-radius: .65rem; background: color-mix(in oklab, var(--yellow), transparent 92%); }
+  .approval h3 { font-size: .76rem; }
+  .approval p { margin-block: .25rem .55rem; color: var(--muted); font-size: .7rem; }
+  .approval-actions { display: flex; gap: .4rem; }
+  .approval button { min-block-size: 2rem; padding: .3rem .55rem; border: 1px solid var(--line); border-radius: .45rem; background: var(--raised-2); cursor: pointer; font-size: .7rem; }
+  .approval .allow { border-color: var(--green); color: var(--green); }
+  .ledger { overflow-y: auto; border-inline-start: 1px solid var(--line); background: #151615; }
+  .ledger-title { position: sticky; inset-block-start: 0; padding: .58rem .55rem; border-block-end: 1px solid var(--line); background: #151615; color: var(--muted); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .run { display: grid; gap: .18rem; padding: .6rem .55rem; border-block-end: 1px solid var(--line); }
+  .run-top { display: flex; align-items: center; gap: .35rem; }
+  .run-dot { inline-size: .42rem; block-size: .42rem; border-radius: 50%; background: var(--green); }
+  .run[data-state="running"] .run-dot { background: var(--yellow); animation: pulse 1.2s infinite; }
+  .run-name { font-size: .68rem; font-weight: 650; }
+  .run-meta { color: var(--muted); font-size: .59rem; line-height: 1.35; }
+  .new-run { inline-size: calc(100% - .8rem); min-block-size: 2rem; margin: .4rem; border: 1px dashed var(--line); border-radius: .45rem; background: transparent; color: var(--muted); cursor: pointer; font-size: .67rem; }
+  .composer-wrap { padding: .65rem .75rem .75rem; border-block-start: 1px solid var(--line); background: var(--raised); }
+  .capabilities { display: flex; align-items: center; gap: .35rem; margin-block-end: .45rem; overflow-x: auto; }
+  .capability { flex: none; min-block-size: 1.65rem; padding: .2rem .42rem; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); font-size: .62rem; }
+  .capability.on { border-color: color-mix(in oklab, var(--green), var(--line)); color: var(--green); }
+  .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .45rem; align-items: end; }
+  textarea { min-block-size: 3rem; max-block-size: 8rem; padding: .6rem; resize: none; border: 1px solid var(--line); border-radius: .65rem; background: #121312; field-sizing: content; }
+  .send { min-inline-size: 3rem; min-block-size: 3rem; border: 1px solid var(--copper); border-radius: .65rem; background: #4a342a; cursor: pointer; }
+  .status-line { margin-block-start: .38rem; color: var(--muted); font-size: .61rem; }
+  .toast { position: fixed; inset: auto .8rem .8rem; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--ink); color: var(--bg); opacity: 0; pointer-events: none; transition: opacity .15s ease; }
+  @keyframes pulse { 50% { opacity: .35; } }
+}
+@layer states {
+  .toast.show { opacity: 1; }
+  @media (max-width: 32rem) { .workspace { grid-template-columns: 1fr; } .ledger { display: flex; overflow-x: auto; border-inline-start: 0; border-block-start: 1px solid var(--line); } .ledger-title { display: none; } .run { min-inline-size: 7.5rem; border-block-end: 0; border-inline-end: 1px solid var(--line); } .new-run { inline-size: 6rem; flex: none; } }
+  @media (prefers-reduced-motion: reduce) { .run[data-state="running"] .run-dot { animation: none; } .toast { transition: none; } }
+  @media (forced-colors: active) { .run-dot, .live { border: 1px solid CanvasText; } }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar"><div><div class="title-line"><span class="live" aria-hidden="true"></span><h1>Resonant Sidecar</h1></div><p class="metric-label">Agent workbench</p></div><select class="agent-select" id="agent" name="agent" aria-label="Agent"><option>Hermes</option><option>Grok</option><option>Codex</option></select></header>
+  <section class="telemetry" aria-label="Current connection"><div class="metric"><p class="metric-label">Browser lane</p><p class="metric-value">Chrome Stable · Connected</p></div><div class="metric"><p class="metric-label">Active target</p><p class="metric-value">Side Panel API — Chrome Developers</p></div></section>
+  <div class="workspace">
+    <main class="conversation"><ol class="messages"><li class="message user"><span class="who">You</span><p class="copy">Inspect the active page and tell me which lifecycle events matter when I change tabs.</p></li><li class="message assistant"><span class="who">Hermes</span><p class="copy">The durable relationship should follow the browser lane and selected tab. A navigation replaces document state; activation changes the selected target. Neither event should reset this conversation.</p><section class="approval"><h3>Page action proposed</h3><p>Highlight the relevant sentence on the current page. This changes page presentation until refresh.</p><div class="approval-actions"><button class="allow" id="allow" type="button">Allow once</button><button id="decline" type="button">Not now</button></div></section></li></ol></main>
+    <aside class="ledger" aria-label="Agent activity"><p class="ledger-title">Activity</p><article class="run"><div class="run-top"><span class="run-dot"></span><span class="run-name">List pages</span></div><span class="run-meta">4 targets · complete</span></article><article class="run"><div class="run-top"><span class="run-dot"></span><span class="run-name">Inspect DOM</span></div><span class="run-meta">Read only · complete</span></article><article class="run" id="activeRun" data-state="running"><div class="run-top"><span class="run-dot"></span><span class="run-name">Awaiting you</span></div><span class="run-meta">Highlight request</span></article><button class="new-run" id="simulate" type="button">+ Simulate run</button></aside>
+  </div>
+  <footer class="composer-wrap"><div class="capabilities" aria-label="Current access and approval"><span class="capability on">Access: read active page</span><span class="capability">Approval: Minimal</span><span class="capability">Excluded: cookies</span></div><form class="composer" id="composer"><textarea id="message" name="message" aria-label="Message Hermes" placeholder="Give Hermes a task…"></textarea><button class="send" type="submit">Send</button></form><p class="status-line">One browser connection · target context refreshes automatically</p></footer>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+const toast = document.querySelector('#toast');
+const run = document.querySelector('#activeRun');
+const allow = document.querySelector('#allow');
+const decline = document.querySelector('#decline');
+function show(text) { toast.textContent = text; toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 1700); }
+function settleApproval(result, notice) { run.dataset.state = 'complete'; run.querySelector('.run-name').textContent = 'Highlight'; run.querySelector('.run-meta').textContent = result; allow.disabled = true; decline.disabled = true; show(notice); }
+allow.addEventListener('click', () => settleApproval('Allowed once · complete', 'Page highlight allowed once'));
+decline.addEventListener('click', () => settleApproval('Declined · no change', 'No page change made'));
+document.querySelector('#simulate').addEventListener('click', () => { run.dataset.state = 'running'; run.querySelector('.run-name').textContent = 'Inspecting page'; run.querySelector('.run-meta').textContent = 'Read only · running'; setTimeout(() => { run.dataset.state = 'complete'; run.querySelector('.run-name').textContent = 'Inspect page'; run.querySelector('.run-meta').textContent = 'Read only · complete'; }, 1100); });
+document.querySelector('#composer').addEventListener('submit', event => { event.preventDefault(); const field = document.querySelector('#message'); if (!field.value.trim()) return; show('Task sent to Hermes'); field.value = ''; });
+</script>
+</body>
+</html>
