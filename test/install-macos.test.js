@@ -8,7 +8,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 import { canonicalJson, sha256Bytes, sha256Json } from '../review/canonical-json.js';
-import { VersionStore } from '../bootstrap/version-store.js';
+import { VersionStore } from './fixtures/runtime-components.js';
 import { buildInstallPlan, inspectExecutable, migrateInstallation, parseInstallerArgs, switchRegistration } from '../scripts/install-macos.js';
 import { inspectCurrentInstallation, verifyInstallPlan, verifyStoredMigrationChain } from '../scripts/verify-install-plan.js';
 import { loadReviewPolicy } from '../review/policy-registry.js';
@@ -21,8 +21,8 @@ const codexIdentity = executable => ({ path: executable, bytes: 7, sha256: '9'.r
 test('V2 install plan seals exact control identities and omits declaration-only semantic input', () => {
   const plan = fixturePlan('/tmp/v2-dry-run');
   assert.equal(plan.reviewPolicyVersion, 2);
-  assert.equal(plan.controlPlane.files.length, 49);
-  assert.equal(plan.trustedBootstrap.files.length, 40);
+  assert.equal(plan.controlPlane.files.length, 50);
+  assert.equal(plan.trustedBootstrap.files.length, 41);
   assert.equal(plan.stableExtension.files.length, 8);
   const contract = plan.trustedBootstrap.files.find(file => file.path === 'review/chrome-review-contract.js');
   assert.equal(contract.sha256, plan.stableExtension.files.find(file => file.path === 'chrome-review-contract.js').sha256);

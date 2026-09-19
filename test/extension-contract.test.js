@@ -6,7 +6,7 @@ import vm from 'node:vm';
 import { SidecarSession } from '../extension/sidepanel-controller.js';
 import { bridgeFixture, NOW, RAW, observations, until, wireBinding } from './fixtures/chrome-bridge.js';
 import { ChromeReviewBridge } from '../review/chrome-review-bridge.js';
-import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { ChromeReviewJournal } from './fixtures/runtime-components.js';
 import { buildChromeReviewRequest } from '../review/semantic-evidence.js';
 
 class FakeEvent {

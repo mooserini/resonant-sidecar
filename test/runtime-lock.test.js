@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { writeFile, lstat } from 'node:fs/promises';
 import path from 'node:path';
-import { VersionStore } from '../bootstrap/version-store.js';
+import { VersionStore } from './fixtures/runtime-components.js';
 import { runtimeFixture, decisionFor } from './fixtures/runtime.js';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -17,7 +17,7 @@ test('two starters after a dead owner cannot unlink a replacement live lock or e
   const lock = path.join(f.root, '.store-lock.json'); await writeFile(lock, JSON.stringify({pid:dead.pid})+'\n', {mode:0o600});
   const events=[]; const children=[];
   for (const id of ['a','b']) {
-    const script=`import fs from 'node:fs';import { VersionStore } from ${JSON.stringify(new URL('../bootstrap/version-store.js', import.meta.url).href)};
+    const script=`import fs from 'node:fs';import { VersionStore } from ${JSON.stringify(new URL('./fixtures/runtime-components.js', import.meta.url).href)};
       const unlink=fs.unlinkSync;let intercepted=false;
       fs.unlinkSync=p=>{if(p===${JSON.stringify(lock)}&&!intercepted){intercepted=true;process.send('stale-read');while(!fs.existsSync(${JSON.stringify(path.join(f.root, 'allow-'+id))}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return unlink(p);};
       const store=new VersionStore({projectRoot:${JSON.stringify(f.projectRoot)},consumeDecision:async d=>{process.send('entered');await new Promise(r=>process.once('message',r));return {...d,consumed:false};}});
@@ -42,7 +42,7 @@ test('two starters after a dead owner cannot unlink a replacement live lock or e
 
 test('SIGKILL releases the permanent kernel lock without replacing its inode', async t => {
   const f=await runtimeFixture(t);const staged=await f.stage('a');await new VersionStore({projectRoot:f.projectRoot}).installVersion(staged);
-  const script=`import { VersionStore } from ${JSON.stringify(new URL('../bootstrap/version-store.js',import.meta.url).href)};
+  const script=`import { VersionStore } from ${JSON.stringify(new URL('./fixtures/runtime-components.js',import.meta.url).href)};
     const store=new VersionStore({projectRoot:${JSON.stringify(f.projectRoot)},consumeDecision:async()=>{process.send('held');await new Promise(()=>{});}});await store.activate(${JSON.stringify(decisionFor(staged))});`;
   const owner=spawn(process.execPath,['--input-type=module','-e',script],{stdio:['ignore','ignore','pipe','ipc'],env:{PATH:'/usr/bin:/bin'}});
   t.after(()=>{if(owner.exitCode===null)owner.kill('SIGKILL');});await once(owner,'message');

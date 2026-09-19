@@ -60,12 +60,18 @@ authenticated Hermes (`hermes acp --check`), Grok Build, or Codex CLI.
 
 ```sh
 npm run check
+npm run check:runtime-lock
+npm run check:release
 npm run smoke:real
 ```
 
-`npm run check` is the default gate. `npm run smoke:real` still exercises the
-Codex app-server path when an authenticated Codex CLI is present. It prints
-thread/turn IDs and SHA-256 reply receipts rather than a transcript.
+`npm run check` is the ordinary application gate and uses a real kernel-backed
+test lock without host-specific Apple identity verification.
+`npm run check:runtime-lock` verifies the production macOS lock provider.
+`npm run check:release` is the release gate and requires both lanes.
+`npm run smoke:real` still exercises the Codex app-server path when an
+authenticated Codex CLI is present. It prints thread/turn IDs and SHA-256 reply
+receipts rather than a transcript.
 
 ## Sealed V2 preparation — no live migration
 
@@ -107,7 +113,7 @@ creates an owner-only Codex review home, seeds a self-consistent active pin,
 recovery state, and installation witness, and preserves the old launcher and
 manifest read-only. Review policy, receipt validation, and runtime wiring select
 V2 explicitly; bundle manifests remain the existing format `schemaVersion: 1`.
-The exact frozen control inventory is 49 source files: 38 trusted-bootstrap,
+The exact frozen control inventory is 50 source files: 39 trusted-bootstrap,
 8 stable-extension, and 3 installer files. The bootstrap also seals its generated
 `package.json` and `runtime-entry.js`. The plan binds the policy, Chrome schema,
 adapter, and one shared digest for the byte-identical Node/browser Chrome
@@ -176,6 +182,7 @@ The project has no runtime package dependencies. Unit and process-level tests us
 ```sh
 npm test
 npm run check
+npm run check:release
 ```
 
 Generated runtime, migration receipts, and Chrome registration stay on the

@@ -14,7 +14,7 @@ import { loadReviewPolicy, reviewPolicyDigest } from '../review/policy-registry.
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PINNED_POLICY = loadReviewPolicy(2);
-const PINNED_POLICY_DIGEST = '0d2dd5d21fd49431cd0153a1d30d151d5200ecbb176b177750202c2e79fdddd0';
+const PINNED_POLICY_DIGEST = 'ae296384faa4d3e27e3e3e96fe29b20adbb9ac72a928726fc0aa9f026bbdc295';
 const COMMIT = /^[0-9a-f]{40}$/;
 const SAFE_MODE = new Map([['100644', 0o644]]);
 const LIFECYCLE = new Set(['preinstall', 'install', 'postinstall', 'preuninstall', 'uninstall', 'postuninstall', 'prepack', 'prepare', 'preprepare', 'postprepare', 'prepublish', 'publish', 'postpublish', 'prepublishOnly', 'postpack', 'preversion', 'version', 'postversion', 'pretest', 'posttest', 'prestop', 'stop', 'poststop', 'prestart', 'start', 'poststart', 'prerestart', 'restart', 'postrestart', 'preshrinkwrap', 'shrinkwrap', 'postshrinkwrap']);
@@ -27,6 +27,7 @@ export const TRUSTED_BOOTSTRAP_FILES = Object.freeze([
   'bootstrap/host.js',
   'bootstrap/native-proxy.js',
   'bootstrap/recovery-state.js',
+  'bootstrap/runtime-lock-core.js',
   'bootstrap/runtime-lock.js',
   'bootstrap/version-store.js',
   'native-host/native-framing.js',

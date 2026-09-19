@@ -2,9 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import * as journalModule from '../bootstrap/chrome-review-journal.js';
+import * as journalModule from './fixtures/runtime-components.js';
 import { canonicalJson } from '../review/canonical-json.js';
 import { bridgeFixture, RESTART, OTHER } from './fixtures/chrome-bridge.js';
+
+test('uses the supplied runtime lock provider instead of the production default', async t => {
+  const f = await bridgeFixture(t);
+  const withRuntimeLock = async () => { throw new Error('injected runtime lock reached'); };
+  const journal = new journalModule.ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: RESTART, withRuntimeLock });
+  await assert.rejects(() => journal.recover(), /injected runtime lock reached/);
+});
 
 async function fixture(t) {
   const f = await bridgeFixture(t); const journal = new journalModule.ChromeReviewJournal({ projectRoot: f.projectRoot, restartId: RESTART });

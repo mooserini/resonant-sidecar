@@ -6,7 +6,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { runtimeFixture, decisionFor, consumer } from './fixtures/runtime.js';
-import { VersionStore } from '../bootstrap/version-store.js';
+import { VersionStore, ChromeReviewJournal, withTestRuntimeLock } from './fixtures/runtime-components.js';
 import { ReceiptStore } from '../review/receipt-store.js';
 import { DecisionNonces } from '../review/decision-nonce.js';
 import { ReviewCoordinator } from '../review/review-coordinator.js';
@@ -16,7 +16,7 @@ import { sha256Bytes, sha256Json } from '../review/canonical-json.js';
 import { collectMacOSEvidence } from '../review/macos-evidence.js';
 import { policy as osPolicy, runner } from './fixtures/macos/fixture.js';
 import { bridgeFixture, observations, NOW, RAW, until } from './fixtures/chrome-bridge.js';
-import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+
 import { ChromeReviewBridge } from '../review/chrome-review-bridge.js';
 import { loadReviewPolicy } from '../review/policy-registry.js';
 
@@ -79,7 +79,7 @@ async function liveFixture(t, options = {}) {
   coordinator = new ReviewCoordinator(deps);
   const input = new PassThrough(); const starts = []; const turns = []; const reaped = [];
   const output = new PassThrough(); const messages = []; const decoder = new NativeMessageDecoder(message => messages.push(message)); output.on('data', chunk => decoder.push(chunk));
-  bootstrap = await runBootstrap({ store, coordinator, input, output, ...(options.chrome ? { chromeReview: { projectRoot: f.projectRoot, clock: () => NOW, ...observations } } : {}), signals: new EventEmitter(), proxyFactory: ({ active, onMessage }) => {
+  bootstrap = await runBootstrap({ store, coordinator, input, output, ...(options.chrome ? { chromeReview: { projectRoot: f.projectRoot, clock: () => NOW, ...observations, withRuntimeLock: withTestRuntimeLock } } : {}), signals: new EventEmitter(), proxyFactory: ({ active, onMessage }) => {
     starts.push(active.reviewId);
     return { pid: 103, send: m => { if (rejectSend) throw new Error('proxy transport rejected frame'); if (m.type === 'session.open') queueMicrotask(() => onMessage({ type: 'session.ready', threadId: 'thread-kept' })); else turns.push({ reviewId: active.reviewId, type: m.type }); }, close: async () => { reaped.push(active.reviewId); } };
   } });
@@ -270,7 +270,7 @@ for (const failure of ['proxy-send', 'framing']) test(`actual ${failure} failure
 test('native disconnect invalidates an emitted Chrome invocation before late result can settle it', async t => {
   const f = await bridgeFixture(t, { runtimeGeneration: 1 }); const input = new PassThrough(); let reaped = false;
   const runtime = await runBootstrap({ input, output: new PassThrough(), signals: new EventEmitter(),
-    chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW },
+    chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW, withRuntimeLock: withTestRuntimeLock },
     store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: f.binding.activeDigest, reviewId: 'active' }) },
     proxyFactory: () => ({ pid: 103, send() {}, close: async () => { reaped = true; } }),
   });
@@ -287,7 +287,7 @@ test('native disconnect invalidates an emitted Chrome invocation before late res
 
 for (const action of ['generation-change', 'emergency-stop']) test(`${action} aborts Chrome immediately while preserving ordinary runtime ownership`, async t => {
   const f = await bridgeFixture(t, { runtimeGeneration: 1 }); const input = new PassThrough(); const turns = [];
-  const runtime = await runBootstrap({ input, output: new PassThrough(), signals: new EventEmitter(), chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW },
+  const runtime = await runBootstrap({ input, output: new PassThrough(), signals: new EventEmitter(), chromeReview: { projectRoot: f.projectRoot, ...observations, clock: () => NOW, withRuntimeLock: withTestRuntimeLock },
     store: { recover: async () => {}, bindRuntimeGuard() {}, resolveActiveHost: async () => ({ digest: f.binding.activeDigest, reviewId: 'active' }) },
     proxyFactory: () => ({ pid: 103, send: message => turns.push(message), close: async () => {} }),
   });

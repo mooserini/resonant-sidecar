@@ -25,6 +25,7 @@ const trustedControlPaths = [
   'bootstrap/host.js',
   'bootstrap/native-proxy.js',
   'bootstrap/recovery-state.js',
+  'bootstrap/runtime-lock-core.js',
   'bootstrap/runtime-lock.js',
   'bootstrap/version-store.js',
   'extension/chrome-review-adapter.js',

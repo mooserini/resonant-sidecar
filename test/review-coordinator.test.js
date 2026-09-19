@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ReviewCoordinator } from '../review/review-coordinator.js';
-import { VersionStore } from '../bootstrap/version-store.js';
+import { VersionStore } from './fixtures/runtime-components.js';
 import { runtimeFixture, decisionFor, consumer } from './fixtures/runtime.js';
 import { sha256Bytes, canonicalJson } from '../review/canonical-json.js';
 import { readFileSync } from 'node:fs';
@@ -19,7 +19,7 @@ import { runBootstrap } from '../bootstrap/host.js';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { loadReviewPolicy } from '../review/policy-registry.js';
-import { ChromeReviewJournal } from '../bootstrap/chrome-review-journal.js';
+import { ChromeReviewJournal } from './fixtures/runtime-components.js';
 import { ChromeReviewBridge } from '../review/chrome-review-bridge.js';
 import { CHANNEL, RESTART, OTHER, NOW, RAW, observations } from './fixtures/chrome-bridge.js';
 import { createLifecycleRouter } from '../native-host/sidecar-protocol.js';
