@@ -37,6 +37,16 @@ No TCP listener is created. Chrome launches the native host and communicates thr
 - Sidecar-defined slash commands.
 - Multi-agent routing.
 
+## Context Canvas first production slice
+
+The production side panel is Hermes-only and keeps conversation primary. Its quiet context strip makes the current boundary visible without acquiring new browser authority:
+
+> Opening Sidecar may identify the active page by its visible title and site, but it does not imply permission to read that page’s contents.
+
+The current manifest grants only `nativeMessaging`, `sidePanel`, and `storage`, with no host permissions. Chrome classifies `tabs.Tab.url`, `pendingUrl`, `title`, and `favIconUrl` as sensitive properties: reading them through `tabs.query()` requires the `tabs` permission, a matching host permission, or a temporary `activeTab` grant after a user invocation. See the Chrome documentation for [the Tabs API permission model](https://developer.chrome.com/docs/extensions/reference/api/tabs#permissions) and [`activeTab`](https://developer.chrome.com/docs/extensions/develop/concepts/activeTab).
+
+Because this slice deliberately adds none of those permissions, it must not claim to know the active page title or site. The strip therefore reports title/site as unavailable, states that page content is not shared, and leaves “Share more…” and visible-page capture disabled. It performs no tab query, page injection, DOM read, screenshot capture, or automatic attachment.
+
 ## Message contracts
 
 Chrome-to-host messages:

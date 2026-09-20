@@ -164,6 +164,7 @@ for (const origin of ['remote', 'local']) test(`${origin} disconnect restores fo
   if (origin === 'remote') port.onDisconnect.emit(); else windowEvents.pagehide();
   assert.equal(document.activeElement, node('turn-text'));
   assert.equal(node('review-card').hidden, true); assert.equal(node('connection-status').textContent, 'Disconnected');
+  assert.equal(node('send-button').disabled, true, 'a disconnected composer cannot advertise Send');
   assert.equal(node('stop-button').disabled, true);
   const count = port.posted.length;
   // Even a retained old DOM handler must not be able to submit an old grant.
@@ -261,15 +262,32 @@ test('manifest grants only native messaging, side panel, and session storage', a
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
 });
 
-test('first slice opens Hermes by default', async () => {
+test('production shell is Hermes-only and preserves the existing native-host opening message', async () => {
   const html = await readFile(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const port = new FakePort();
   const session = new SidecarSession({ connectNative: () => port, storage: createStorage() });
 
   await session.connect();
 
-  assert.match(html, /<option value="hermes" selected>Hermes<\/option>/);
+  assert.doesNotMatch(html, /<select|value="grok"|value="codex"|>Agent</);
   assert.deepEqual(port.posted, [{ type: 'session.open', threadId: null, agent: 'hermes' }]);
+});
+
+test('quiet context strip tells the truth when title and site are unavailable without wider permissions', async () => {
+  const html = await readFile(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+  const script = await readFile(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  const css = await readFile(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
+
+  assert.match(html, /id="context-strip"/);
+  assert.match(html, /Current page · context unavailable/i);
+  assert.match(html, /Title and site unavailable/i);
+  assert.match(html, /Page content not shared/i);
+  assert.match(html, /id="share-more"[^>]*disabled[^>]*aria-label="[^"]*unavailable/i);
+  assert.match(html, /id="capture-page"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="welcome"[^>]*aria-hidden="true"/);
+  assert.doesNotMatch(css, /#stop-button:disabled\s*{[^}]*display:\s*none/);
+  assert.doesNotMatch(css, /\.composer-tool\s*{[^}]*display:\s*none/);
+  assert.doesNotMatch(script, /chrome\.(?:tabs|scripting|debugger)|captureVisibleTab|document\.(?:body|documentElement)\.innerText/);
 });
 
 test('first slice labels Hermes replies truthfully', async () => {
