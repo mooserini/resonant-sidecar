@@ -253,6 +253,37 @@ The governing product contract is:
 > at any time. Hermes never captures screenshots, form values, or other tabs
 > through this text-sharing feature.
 
+## Selected shell and deferred saved-site rules
+
+The selected everyday shell is **Quiet Context Strip**. The title/site boundary,
+explicit **Share more…** action, composer attachments, and one-shot camera
+control are sufficient for ordinary use without making context management look
+like a control booth.
+
+The Disclosure Card is not a persistent home surface. Its explanation may be
+revealed on demand from the header ellipsis under plain-language labels such as
+**Page sharing settings** or **About page sharing**. Those entries explain the
+standing boundary; they do not attach page content. **Share more…** remains the
+separate, visible sharing action. The Context Ledger remains a useful
+inspectability study but is not the mainstream interaction model.
+
+A later settings design may support human-authored saved rules at global,
+domain, or individual-page scope:
+
+- **Never allow:** prevent page-text sharing for a matching site/page until the
+  human removes the rule.
+- **Always allow this named scope:** remember a specific depth and lifetime so
+  the human can invoke it without repeating the full explanation.
+- A deny rule wins over an allow rule when scopes overlap.
+- An allow rule does not itself attach content, create ambient observation, or
+  grant interaction authority; a visible human sharing action is always
+  required. Any future ambient-observation model would be a separate product
+  and authority decision, not a saved-site preference.
+
+Saved site rules are deferred product direction only. Their matching semantics,
+storage, synchronization, edit/revocation UI, and browser permission needs must
+be separately specified and tested before implementation.
+
 ## Future one-shot visual capture
 
 A later visual-context feature may add a camera button as an explicit per-use
