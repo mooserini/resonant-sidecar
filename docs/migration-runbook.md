@@ -1,14 +1,18 @@
 # Sealed V2 Preparation and Migration Runbook
 
-Status: live V1 remains attached. Chrome-review Tasks 1–11 are locally complete.
-The next operator plan is `docs/superpowers/plans/2026-09-15-v1-to-v2-migration.md`.
-This runbook is still the installer/recovery text. It does not by itself
-authorize `--migrate`, a registration switch, or a candidate review.
+Status: historical and not the current roadmap. Live V1 remains attached, and
+Chrome-review Tasks 1–11 remain locally complete. The former next-step proposal
+is preserved at `docs/superpowers/plans/2026-09-15-v1-to-v2-migration.md`.
+This runbook remains installer/recovery evidence, but it does not authorize
+`--migrate`, a registration switch, or a candidate review. Do not execute it
+unless the migration path is explicitly revived after the capability-first,
+Hermes-only product slice is assessed.
 
 ## Hard stop
 
-Do not run `--migrate` until Tom approves the binding dry-run from the 2026-09-15
-plan (Chrome Dev quit, clean HEAD after that plan commit, `--extension-id`
+Do not run `--migrate` under the current roadmap. If Tom explicitly revives this
+historical path, the original 2026-09-15 plan additionally required approval of
+its binding dry-run (Chrome Dev quit, clean HEAD after that plan commit, `--extension-id`
 `dcgoknilbkadmmiahhgefnckiiihgekp`). That ID is the derived unpacked ID of the
 stable path, not the live V1 ID `algfplhdbapdaoimggafkgmpmnadfppl`. Approval of
 the inert capability probe, of Task 10, or of a preview hash taken before the
@@ -70,7 +74,8 @@ ordinary candidates cannot authorize that change.
 
 ## Approved preparation command shape
 
-Only after approval, copy the exact values from the still-current plan:
+Only after an explicit revival and the historical plan's required approval,
+copy its exact values:
 
 ```sh
 node scripts/install-macos.js \
