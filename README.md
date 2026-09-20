@@ -73,7 +73,15 @@ test lock without host-specific Apple identity verification.
 authenticated Codex CLI is present. It prints thread/turn IDs and SHA-256 reply
 receipts rather than a transcript.
 
-## Sealed V2 preparation — no live migration
+## Historical sealed V2 preparation — not the current roadmap
+
+> [!NOTE]
+> The current product direction is the capability-first browser relationship in
+> [Browser Session Continuity](docs/browser-session-continuity.md), with
+> [Context Canvas](sketches/README.md) as the selected interface shell. The
+> sealed V2 migration machinery below remains preserved and testable, but it is
+> not the next operator action and must not be run unless that path is explicitly
+> revived after the first Hermes-only, read-only product slice is assessed.
 
 Keep the working V1 attachment and registration intact. This checkout now
 contains the V2 Chrome semantic-review control plane; do not load its changed
@@ -85,9 +93,10 @@ Preview the plan using the already-observed extension ID without changing files:
    ```
 
 The Chrome-review Task 10 mocked gate and Task 11 inert capability check do not
-authorize installation. Live migration follows
-`docs/superpowers/plans/2026-09-15-v1-to-v2-migration.md`. The old Task 12
-candidate Review-and-Refresh remains a later plan.
+authorize installation. The superseded migration proposal remains preserved in
+`docs/superpowers/plans/2026-09-15-v1-to-v2-migration.md`; it is historical
+engineering evidence, not current authorization. The old Task 12 candidate
+Review-and-Refresh is likewise not on the active roadmap.
 
 The current installer is now migration-oriented. With only `--extension-id`, it
 performs a read-only inspection of committed `HEAD` and the current V1 launcher

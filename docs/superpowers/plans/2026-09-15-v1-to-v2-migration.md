@@ -1,6 +1,13 @@
 # V1 → V2 Migration Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: superseded as the next operator plan.** This document is preserved
+> as historical engineering evidence. It does not authorize migration and must
+> not be executed unless the sealed V2 path is explicitly revived after the
+> capability-first, Hermes-only product slice is assessed.
+
+> **Historical execution note:** At authorship, agentic workers were required to
+> use a task-by-task implementation workflow. That instruction is inert unless
+> this plan is explicitly revived.
 
 **Goal:** Move the working Chrome Dev Agent-profile sidecar from the V1 working-tree native host to the sealed V2 pinned runtime without a silent registration swap, without a GitHub remote, and without a real candidate Review-and-Refresh until that later mutation is separately approved.
 
@@ -8,7 +15,9 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-14-visible-review-refresh-design.md` and amendment `docs/superpowers/specs/2026-09-14-chrome-native-semantic-review-amendment-design.md`
 
-**Runbook:** `docs/migration-runbook.md` remains the operator text. This plan is the exact next ledger. Do not revive the old visible-review-refresh Task 12 as if `--migrate` still replaced registration.
+**Runbook:** `docs/migration-runbook.md` preserves the former operator text. This
+plan is a historical ledger, not the current next step. Do not revive the old
+visible-review-refresh Task 12 as if `--migrate` still replaced registration.
 
 **Prerequisite:** Chrome-native semantic-review Tasks 1–11 are locally complete at `f20d6c1` (`docs: record Chrome model capability check`). That capability receipt does not authorize installation.
 
