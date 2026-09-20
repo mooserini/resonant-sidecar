@@ -40,7 +40,7 @@ class FakePort {
 }
 
 function createStorage(threadId = null) {
-  const values = threadId ? { 'threadId:grok': threadId } : {};
+  const values = threadId ? { 'threadId:hermes': threadId } : {};
   return {
     values,
     async get(query) {
@@ -217,7 +217,7 @@ for (const origin of ['local', 'remote', 'reentrant-local']) test(`${origin} dis
   if (origin === 'remote') ports[0].onDisconnect.emit(); else session.disconnect();
   assert.equal(closed, 1); assert.equal(session.port, null); assert.equal(session.canNavigateReview, false);
   session.disconnect(); assert.equal(closed, 1);
-  await session.connect(); assert.equal(connections, 2); assert.deepEqual(ports[1].posted, [{ type: 'session.open', threadId: null, agent: 'grok' }]);
+  await session.connect(); assert.equal(connections, 2); assert.deepEqual(ports[1].posted, [{ type: 'session.open', threadId: null, agent: 'hermes' }]);
   for (const message of [eligible, { type: 'session.ready', threadId: 'stale' }, { type: 'turn.started' }]) ports[0].onMessage.emit(message);
   ports[0].onDisconnect.emit(); assert.equal(session.port, ports[1]); assert.equal(session.turnActive, false); assert.equal(session.reviewState, 'idle'); assert.equal(closed, 1);
   assert.equal(ports[0].disconnectCalls, origin === 'remote' ? 0 : 1);
@@ -261,7 +261,29 @@ test('manifest grants only native messaging, side panel, and session storage', a
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
 });
 
-test('opens the stored Codex thread over the named native host', async () => {
+test('first slice opens Hermes by default', async () => {
+  const html = await readFile(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+  const port = new FakePort();
+  const session = new SidecarSession({ connectNative: () => port, storage: createStorage() });
+
+  await session.connect();
+
+  assert.match(html, /<option value="hermes" selected>Hermes<\/option>/);
+  assert.deepEqual(port.posted, [{ type: 'session.open', threadId: null, agent: 'hermes' }]);
+});
+
+test('first slice labels Hermes replies truthfully', async () => {
+  const { node, port } = await renderedPanel();
+
+  port.onMessage.emit({ type: 'turn.started', turnId: 'turn-1' });
+  port.onMessage.emit({ type: 'assistant.delta', text: 'Hello from Hermes.' });
+
+  const message = node('transcript').children.at(-1);
+  assert.equal(message.children[0].textContent, 'Hermes');
+  assert.equal(message.children[1].textContent, 'Hello from Hermes.');
+});
+
+test('opens the stored Hermes thread over the named native host', async () => {
   const port = new FakePort();
   const storage = createStorage('thread-existing');
   const session = new SidecarSession({
@@ -274,7 +296,7 @@ test('opens the stored Codex thread over the named native host', async () => {
 
   await session.connect();
 
-  assert.deepEqual(port.posted, [{ type: 'session.open', threadId: 'thread-existing', agent: 'grok' }]);
+  assert.deepEqual(port.posted, [{ type: 'session.open', threadId: 'thread-existing', agent: 'hermes' }]);
 });
 
 test('stores only the ready thread id and forwards exact turn text', async () => {
@@ -292,8 +314,8 @@ test('stores only the ready thread id and forwards exact turn text', async () =>
 
   session.sendTurn('/literal λ text');
 
-  assert.equal(storage.values['threadId:grok'], 'thread-new');
-  assert.deepEqual(Object.keys(storage.values), ['threadId:grok']);
+  assert.equal(storage.values['threadId:hermes'], 'thread-new');
+  assert.deepEqual(Object.keys(storage.values), ['threadId:hermes']);
   assert.deepEqual(port.posted.at(-1), { type: 'turn.start', text: '/literal λ text' });
   assert.ok(events.some(event => event.type === 'session.ready'));
 });
@@ -446,7 +468,7 @@ test('reconnected Port rejects a retained old ready callback and late model comp
   oldPort.onMessage.emit(ready); await until(() => session.chromeReviewState?.state === 'ready'); const work = session.runChromeReview(); await until(() => model.calls.includes('prompt'));
   session.disconnect(); await work; await session.connect(); oldPort.onMessage.emit(ready); resolveModel(RAW);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(freshPort.posted, [{ type: 'session.open', threadId: null, agent: 'grok' }]); assert.equal(model.calls.filter(call => call === 'availability').length, 1);
+  assert.deepEqual(freshPort.posted, [{ type: 'session.open', threadId: null, agent: 'hermes' }]); assert.equal(model.calls.filter(call => call === 'availability').length, 1);
   assert.equal(await session.runChromeReview(), false);
 });
 

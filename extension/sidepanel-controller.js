@@ -41,7 +41,7 @@ export class SidecarSession {
     this.onEvent = onEvent;
     this.port = null;
     this.turnActive = false;
-    this.agent = 'grok';
+    this.agent = 'hermes';
     this.pending = Promise.resolve();
   }
 

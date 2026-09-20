@@ -61,6 +61,31 @@ The resulting interface has four persistent zones:
 
 Connection failures, incompatible browser state, and stopped operations appear in the same activity/result grammar instead of sending the user into a separate setup maze.
 
+## Second-round: bounded Context Canvas
+
+These newer sketches preserve the accepted title/site-only default and explore how explicit text sharing plus one-shot visual capture should enter the conversation. They are sibling studies; the earlier Context Canvas remains an untouched baseline.
+
+| Variant | Primary emphasis | Best quality | Main cost |
+|---|---|---|---|
+| [Quiet Context Strip](004-quiet-context-strip/index.html) | Conversation-first | Calm, legible, least dashboard-like | Context provenance becomes compact |
+| [Disclosure Card](005-disclosure-card/index.html) | Trust-first | Explains the privacy contract exceptionally well | Uses more vertical space |
+| [Context Ledger](006-context-ledger/index.html) | Inspectability-first | Every context item is visible and removable | Slightly more tool-like |
+
+All three include interactive studies of **Share more from this page…** and the deferred **one-shot camera attachment**. They do not imply browser APIs, permissions, or production implementation.
+
+### Selected direction
+
+Use **Quiet Context Strip** as the primary shell. It already carries the complete everyday model without turning context into a control booth:
+
+- title and site are visible by default;
+- page contents remain unshared;
+- **Share more…** is the direct, bounded escalation;
+- shared text and one-shot visual captures appear as removable composer attachments.
+
+The Disclosure Card is not a persistent home surface. Its explanatory material may appear on demand under the header ellipsis as **Page sharing settings** or **About page sharing**. Those menu entries explain the standing boundary; they do not attach page content. **Share more…** remains the separate, visible sharing action. Context Ledger remains an inspectability study, not the mainstream shell.
+
+The header menu may later expose **Saved site rules**—human-authored domain/page preferences such as *always allow this named sharing scope* or *never allow page-text sharing here*. This is deferred preference design and does not authorize ambient reading or automatic attachment.
+
 ## First implementation slice
 
 Build only enough machinery to prove the product loop:

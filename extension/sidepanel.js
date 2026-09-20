@@ -20,6 +20,7 @@ const chromeStatus = document.getElementById('chrome-review-status');
 const chromeButtons = Object.fromEntries(['prepare-chrome-review', 'run-chrome-review', 'cancel-chrome-review'].map(id => [id, document.getElementById(id)]));
 const CHROME_NOTICE = 'Local analysis uses a Chrome-managed on-device model that may already be stored or updated on this device.';
 const PREPARATION_NOTICE = 'Chrome may download and store an on-device model. Preparation does not run analysis.';
+const AGENT_LABELS = Object.freeze({ hermes: 'Hermes', grok: 'Grok', codex: 'Codex' });
 
 let assistantBody = null;
 
@@ -46,7 +47,7 @@ function appendMessage(role, content = '') {
 
   const label = document.createElement('span');
   label.className = 'message-label';
-  label.textContent = role === 'user' ? 'You' : 'Codex';
+  label.textContent = role === 'user' ? 'You' : AGENT_LABELS[session.agent];
 
   const body = document.createElement('span');
   body.textContent = content;

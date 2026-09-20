@@ -136,16 +136,16 @@ if (mode === 'unit') {
     storage: { get: async query => {
       if (query === 'codexThreadId') return { codexThreadId: 'thread-existing' };
       const keys = Array.isArray(query) ? Array.from(query) : [query];
-      assert.equal(keys[0], 'threadId:grok');
+      assert.equal(keys[0], 'threadId:hermes');
       assert.equal(keys[1], 'resonantAgent');
-      return { 'threadId:grok': 'thread-existing' };
+      return { 'threadId:hermes': 'thread-existing' };
     } },
   });
   await session.connect();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, 'session.open');
   assert.equal(sent[0].threadId, 'thread-existing');
-  if (sent[0].agent !== undefined) assert.equal(sent[0].agent, 'grok');
+  if (sent[0].agent !== undefined) assert.equal(sent[0].agent, 'hermes');
 } else if (mode === 'interruption') {
   const value = await client();
   try {
