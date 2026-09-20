@@ -1,8 +1,8 @@
 import { SidecarSession } from './sidepanel-controller.js';
 
 const transcript = document.querySelector('#transcript');
+const welcome = document.querySelector('#welcome');
 const form = document.querySelector('#turn-form');
-const agentSelect = document.querySelector('#agent');
 const text = document.querySelector('#turn-text');
 const sendButton = document.querySelector('#send-button');
 const stopButton = document.querySelector('#stop-button');
@@ -20,7 +20,7 @@ const chromeStatus = document.getElementById('chrome-review-status');
 const chromeButtons = Object.fromEntries(['prepare-chrome-review', 'run-chrome-review', 'cancel-chrome-review'].map(id => [id, document.getElementById(id)]));
 const CHROME_NOTICE = 'Local analysis uses a Chrome-managed on-device model that may already be stored or updated on this device.';
 const PREPARATION_NOTICE = 'Chrome may download and store an on-device model. Preparation does not run analysis.';
-const AGENT_LABELS = Object.freeze({ hermes: 'Hermes', grok: 'Grok', codex: 'Codex' });
+
 
 let assistantBody = null;
 
@@ -41,13 +41,14 @@ function showError(message) {
 }
 
 function appendMessage(role, content = '') {
+  welcome.hidden = true;
   const item = document.createElement('li');
   item.className = 'message';
   item.dataset.role = role;
 
   const label = document.createElement('span');
   label.className = 'message-label';
-  label.textContent = role === 'user' ? 'You' : AGENT_LABELS[session.agent];
+  label.textContent = role === 'user' ? 'You' : 'Hermes';
 
   const body = document.createElement('span');
   body.textContent = content;
@@ -92,6 +93,7 @@ function handleEvent(event) {
   }
   if (event.type === 'connection.closed') {
     setBusy(false);
+    sendButton.disabled = true;
     renderReview();
     setStatus('Disconnected', 'closed');
     showError('The local sidecar disconnected. Close and reopen the panel to reconnect.');
@@ -193,23 +195,7 @@ for (const [id, method] of Object.entries({ 'start-review': 'startReview', 'acce
 
 window.addEventListener('pagehide', () => session.disconnect());
 
-agentSelect.addEventListener('change', async () => {
-  setStatus('Connecting', 'connecting');
-  try {
-    await session.setAgent(agentSelect.value);
-    session.requestUpdateStatus();
-  } catch {
-    setStatus('Unavailable', 'closed');
-    showError('The local sidecar is unavailable.');
-  }
-});
-
 try {
-  const stored = await chrome.storage.session.get('resonantAgent');
-  if (stored.resonantAgent === 'hermes' || stored.resonantAgent === 'grok' || stored.resonantAgent === 'codex') {
-    session.agent = stored.resonantAgent;
-    agentSelect.value = stored.resonantAgent;
-  }
   await session.connect();
   session.requestUpdateStatus();
 } catch (error) {

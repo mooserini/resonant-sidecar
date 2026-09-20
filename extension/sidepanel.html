@@ -3,17 +3,28 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Resonant Sidecar</title>
+    <title>Hermes Sidecar</title>
     <link rel="stylesheet" href="sidepanel.css">
   </head>
   <body>
     <header class="masthead">
-      <div>
-        <p class="eyebrow">LOCAL CONVERSATION LINK</p>
-        <h1>Resonant Sidecar</h1>
+      <div class="identity">
+        <span class="sigil" aria-hidden="true">H</span>
+        <div>
+          <h1>Hermes</h1>
+          <span id="connection-status" class="status" data-state="connecting">Connecting</span>
+        </div>
       </div>
-      <span id="connection-status" class="status" data-state="connecting">Connecting</span>
     </header>
+
+    <section id="context-strip" class="context-strip" aria-labelledby="context-title">
+      <div class="context-copy">
+        <p class="eyebrow">Current page · context unavailable</p>
+        <h2 id="context-title">Title and site unavailable</h2>
+        <p class="context-meta">Page content not shared</p>
+      </div>
+      <button id="share-more" class="quiet-action" type="button" disabled aria-label="Share more from this page (unavailable)" title="Page sharing is not available in this version">Share more…</button>
+    </section>
 
     <main>
       <section id="review-card" class="review-card" aria-labelledby="review-title" hidden>
@@ -36,31 +47,26 @@
           <button id="dismiss-review" type="button" hidden>Dismiss</button>
         </div>
       </section>
+      <div id="welcome" class="welcome">
+        <h2>Ask Hermes anything.</h2>
+        <p>This conversation starts without page content.</p>
+      </div>
       <ol id="transcript" class="transcript" aria-label="Conversation"></ol>
     </main>
 
-    <footer class="composer">
+    <footer class="composer-shell">
       <p id="announcement" class="sr-only" aria-live="polite"></p>
       <p id="error-message" class="error" role="alert" hidden></p>
-      <form id="turn-form">
-        <div class="agent-row">
-          <label for="agent">Agent</label>
-          <select id="agent" name="agent">
-            <option value="hermes" selected>Hermes</option>
-            <option value="grok">Grok</option>
-            <option value="codex">Codex</option>
-          </select>
-        </div>
-        <label for="turn-text">Message</label>
-        <textarea id="turn-text" name="message" rows="4" maxlength="32768" required></textarea>
-        <div class="actions">
-          <button id="send-button" type="submit">Send turn</button>
-          <button id="stop-button" class="stop" type="button" disabled>
-            <span aria-hidden="true">×</span> Stop
-          </button>
-        </div>
+      <form id="turn-form" class="composer">
+        <button id="capture-page" class="composer-tool" type="button" disabled aria-label="Capture visible page (unavailable)" title="Page capture is not available">▧</button>
+        <label class="sr-only" for="turn-text">Ask Hermes</label>
+        <textarea id="turn-text" name="message" rows="2" maxlength="32768" required placeholder="Ask Hermes…"></textarea>
+        <button id="send-button" class="send" type="submit" aria-label="Send turn" disabled>↑</button>
+        <button id="stop-button" class="stop" type="button" disabled aria-label="Stop current turn">
+          <span aria-hidden="true">×</span><span class="stop-label">Stop</span>
+        </button>
       </form>
-      <p class="boundary">Conversation only · no browser-page access · no tool approvals</p>
+      <p class="boundary">Opening Sidecar does not share page contents.</p>
     </footer>
 
     <script type="module" src="sidepanel.js"></script>
