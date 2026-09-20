@@ -225,6 +225,62 @@ A target or document transition may move the inner state without reconnecting
 the browser-control capability. A browser-control failure may move that
 capability to `unavailable` without disconnecting the Sidecar-to-agent channel.
 
+## Initial page-context product contract
+
+Opening Sidecar may identify the active page by its visible title and site, but
+it does not imply permission to read that page's contents. The default surface
+must say that distinction plainly and offer an explicit **Share more from this
+page…** action.
+
+Any expanded textual context must separate two independent choices:
+
+- **Depth:** selected text, main page content, or all visible page text.
+- **Lifetime:** one request, this document, or a separately reviewed longer
+  tab/site scope.
+
+Before sharing, Sidecar should describe what Hermes will receive and what it
+will not receive. The initial text-reading design excludes screenshots, hidden
+DOM, form values and keystrokes, cookies, credentials, browser history, and
+other tabs. The active context remains visible and removable beside the
+composer. Navigation invalidates document-scoped text rather than silently
+carrying the grant to a replacement document.
+
+The governing product contract is:
+
+> Opening Hermes identifies the active page by title and site but does not read
+> its contents. The human may explicitly share selected text or textual page
+> content, choose a bounded lifetime, inspect what will be sent, and revoke it
+> at any time. Hermes never captures screenshots, form values, or other tabs
+> through this text-sharing feature.
+
+## Future one-shot visual capture
+
+A later visual-context feature may add a camera button as an explicit per-use
+attachment action. Pressing it captures one image of the currently visible
+rendered page viewport and attaches that image to the Hermes conversation.
+It does not enable continuing visual observation or broaden the textual
+page-reading lifetime.
+
+This control is intentionally distinct from **Share more from this page…**:
+
+- one press produces one visible-viewport image;
+- the image may be previewed or removed like any other conversation attachment;
+- navigation, scrolling, or page changes never trigger another capture;
+- no full-page stitching, hidden/offscreen content, video stream, background
+  capture, or automatic recapture is implied;
+- no persistent page-reading grant is created merely because an image was
+  attached;
+- any platform-required temporary capability must be disclosed and proven
+  separately before implementation.
+
+The governing visual-capture rule is:
+
+> A screenshot is a deliberate conversation attachment, not a standing
+> observation grant.
+
+This is a recorded product direction, not authority to add a Chrome permission
+or implementation to the current slice.
+
 ## Current permission boundary
 
 The current Sidecar extension declares only:
