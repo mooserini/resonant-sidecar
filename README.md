@@ -11,17 +11,14 @@
 Experimental local prototype. MIT licensed. Not affiliated with OpenAI, Google,
 or any agent vendor.
 
-Resonant Sidecar is a local Chrome Dev side panel for one durable agent
-conversation. It is not a Codex-only clone of OpenAI's official extension.
-Text enters the panel, crosses Chrome Native Messaging, and reaches a local
-agent subprocess. Assistant text returns over the same path. The panel has a
-single Agent control: **Hermes**, **Grok**, or **Codex**. Copilot is not a
-backend.
+Resonant Sidecar is a local Chrome Dev side panel for one durable Hermes
+conversation. Text enters the panel, crosses Chrome Native Messaging, and
+reaches `hermes acp` over stdio. Assistant text returns over the same path.
+The production panel is intentionally Hermes-only: it has no agent selector.
 
-Conversation uses **ACP over stdio** where the CLI speaks it (`hermes acp`,
-`grok agent stdio`). Codex CLI has no built-in ACP; the sidecar still uses
-`codex app-server` unless `RESONANT_CODEX_ACP` points at an adapter such as
-`@agentclientprotocol/codex-acp`. MCP is for tools, not this chat path.
+Legacy Grok and Codex transport adapters and tests remain in the repository as
+compatibility evidence, not as choices in the current product surface. MCP is
+for tools, not this chat path.
 
 What stays tight is what leaves the machine: native messaging and agent stdio
 are local. Only the spawned agent’s own vendor cloud is contacted. The sealed
@@ -32,11 +29,9 @@ backend swap.
 
 - No TCP, WebSocket, SSH, or localhost listener.
 - No `tabs`, page-content, cookie, history, clipboard, or host permission.
-- No saved transcript. Session storage holds only the selected agent name and a
-  per-agent thread id.
+- No saved transcript. Session storage holds only the Hermes thread id.
 - No sidecar slash-command parser. A leading `/` is ordinary message text.
-- Tool permission requests from the agent are cancelled. Codex app-server is
-  still started read-only with approval policy `never`.
+- Tool permission requests from Hermes are cancelled.
 - The Stop button maps only to interrupt for the active turn.
 
 This prototype proves conversational transport and continuity. It does not yet implement the planned single-use bootstrap secret, CDP enable switch, per-capability approval UI, cache cleaning, or a process-level kill switch. Stop is not an operating-system kill control.
@@ -44,34 +39,37 @@ This prototype proves conversational transport and continuity. It does not yet i
 ## Architecture
 
 ```text
-Chrome Dev MV3 side panel  (Hermes | Grok | Codex)
+Chrome Dev MV3 side panel  (Hermes)
   ↕ Chrome Native Messaging frames
 user-scoped Node native host
-  ↕ ACP stdio  (Hermes, Grok)  or  Codex app-server JSONL
-local agent CLI
+  ↕ ACP stdio
+hermes acp
 ```
 
-Chrome launches the native host only when the side panel connects. Closing the panel disconnects the native port and closes that host process. Thread ids are stored per agent and can be resumed on the next connect.
+Chrome launches the native host only when the side panel connects. Closing the
+panel disconnects the native port and closes that host process. The Hermes
+thread id is stored in session storage and can be resumed on the next connect.
 
 ## Test locally
 
-Requirements: macOS, Chrome Dev, Node.js 22 or newer, and at least one of:
-authenticated Hermes (`hermes acp --check`), Grok Build, or Codex CLI.
+Requirements: macOS, Chrome Dev, Node.js 22 or newer, and authenticated Hermes
+(`hermes acp --check`).
 
 ```sh
 npm run check
 npm run check:runtime-lock
 npm run check:release
-npm run smoke:real
 ```
 
 `npm run check` is the ordinary application gate and uses a real kernel-backed
 test lock without host-specific Apple identity verification.
 `npm run check:runtime-lock` verifies the production macOS lock provider.
 `npm run check:release` is the release gate and requires both lanes.
-`npm run smoke:real` still exercises the Codex app-server path when an
-authenticated Codex CLI is present. It prints thread/turn IDs and SHA-256 reply
-receipts rather than a transcript.
+
+The separate `npm run smoke:real` command is a legacy compatibility smoke test
+for the Codex app-server adapter and requires an authenticated Codex CLI. It
+does not test the Hermes-only production surface. It prints thread/turn IDs and
+SHA-256 reply receipts rather than a transcript.
 
 ## Historical sealed V2 preparation — not the current roadmap
 
