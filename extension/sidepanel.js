@@ -105,7 +105,8 @@ function handleEvent(event) {
   }
   if (event.type === 'error' || event.type === 'protocol.error' || event.type === 'process.error') {
     setBusy(session.turnActive);
-    showError('The local sidecar is unavailable.');
+    setStatus('Unavailable', 'closed');
+    showError('The local sidecar is unavailable. Close and reopen the panel to reconnect.');
   }
 }
 
