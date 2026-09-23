@@ -227,7 +227,7 @@ function maybeReconnect() {
   if (status.dataset.state === 'closed') void reconnect();
 }
 
-document.addEventListener('visibilitychange', () => {
+document.addEventListener?.('visibilitychange', () => {
   if (!document.hidden) maybeReconnect();
 });
 window.addEventListener('pageshow', maybeReconnect);
