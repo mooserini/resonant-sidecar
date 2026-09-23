@@ -9,9 +9,9 @@
   <body>
     <header class="masthead">
       <div class="identity">
-        <span class="sigil" aria-hidden="true">H</span>
+        <span class="sigil" id="agent-sigil" aria-hidden="true">H</span>
         <div>
-          <h1>Hermes</h1>
+          <h1 id="agent-name">Hermes</h1>
           <span id="connection-status" class="status" data-state="connecting">Connecting</span>
         </div>
       </div>
@@ -57,8 +57,10 @@
     <footer class="composer-shell">
       <p id="announcement" class="sr-only" aria-live="polite"></p>
       <p id="error-message" class="error" role="alert" hidden></p>
+      <div id="command-menu" class="command-menu" hidden role="menu" aria-label="Hermes commands"></div>
       <form id="turn-form" class="composer">
-        <button id="capture-page" class="composer-tool" type="button" disabled aria-label="Capture visible page (unavailable)" title="Page capture is not available">▧</button>
+        <button id="capture-page" class="composer-tool" type="button" disabled hidden aria-label="Capture visible page (unavailable)" title="Page capture is not available">▧</button>
+        <button id="command-bar-button" class="composer-tool command-glyph" type="button" aria-label="Hermes commands" title="Commands Hermes hears">c/|\ds</button>
         <label class="sr-only" for="turn-text">Ask Hermes</label>
         <textarea id="turn-text" name="message" rows="2" maxlength="32768" required placeholder="Ask Hermes…"></textarea>
         <button id="send-button" class="send" type="submit" aria-label="Send turn" disabled>↑</button>

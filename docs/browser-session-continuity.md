@@ -344,8 +344,19 @@ Continuity lives in Hermes, not in any pipe. Surfaces are doors. Verified Septem
 - `/resume <session_id|number>` and `/sessions all|full|search <query>` manage named sessions per surface.
 - Resume is **custody-bound**: resuming a session that belongs to a different user or chat is refused. The refusal is quiet and exact — a reasonable boundary, not a ceremony.
 - The panel holds only the Hermes thread id in session storage. It never needs the transcript to continue; Hermes brings history on resume.
+- The panel is white-label by design: `session.ready` may carry the
+  agent's chosen `displayName` (launcher env, else the `You are <Name>`
+  line of `~/.hermes/SOUL.md`) and a capped `image/*` `displayAvatar`
+  data URL. ACP exposes only the programmatic agent identity and there
+  is no canonical avatar slot, so the user-scoped host is the carrier —
+  and the bootstrap proxy shape gate declares both keys, rejecting
+  everything else. Proven live September 2026 (`Ara` + portrait on the
+  wire).
 
-Open question (not yet proven): no list-recent-sessions primitive has been demonstrated over ACP. A panel-level "last five sessions" picker is deferred until session enumeration is proven or panel-side id tracking is specified.
+Answered September 2026: `session/list` over ACP returns live sessions
+(`sessionId`, `title`, `cwd`, `updatedAt`) — observed with real
+sessions. The panel-level "last five sessions" picker is now unblocked;
+it waits behind the button bar, not behind a missing primitive.
 
 ## Known integration question
 

@@ -55,13 +55,31 @@ succeeds across dead processes, and the panel reconnects on show after failure
 
 ## Active work (September 2026)
 
-Branch `fix/reconnect-honest-plumbing` (this branch until merged):
+PR #7 (`fix/reconnect-honest-plumbing`) merged as `3442f15`: honest
+`Unavailable` status, auto-reconnect on visible-after-failure, completed
+Hermes resume handshake, live panel → desktop → Discord handoff with
+verbatim recall. Record: `docs/spikes/001–003`.
 
-- Honest `Unavailable` status on sidecar errors instead of a stuck `Connecting`.
-- Auto-reconnect when the panel becomes visible again after a failure.
-- Completed Hermes resume handshake: resume replies carry no `sessionId`, so the requested id stands; replayed history chunks with no live turn are swallowed, never painted.
-- Verified live end to end: panel message → full Chrome Dev quit → reopen resumes the same session; `/handoff` carries the session panel → desktop → Discord with verbatim recall.
-- Full `npm test`: 1482/1482 pass. Trying-loop spikes 001–003 recorded in `docs/spikes/`.
+Branch `spike/command-bar` (current, unmerged as of 2026-09-23 ~05:40 EDT):
+
+- ACP hears slash: `/status`, `/handoff`, `/new`, `/reset`, `/retry`,
+  `/undo`, `/queue` proven as bare turn text; `/title` needs an
+  argument; `/save` doesn't exist; `/steer` unclear (injection guard
+  narrated rejecting a block never sent — flagged); `/voice` refused as
+  CLI-internal. Voice law settled: **Hermes plays, Chrome never
+  touches.** Record: `docs/spikes/004`.
+- `c/|\ds` glyph button + 8-verb menu: fire verbs send instantly, fill
+  verbs drop text in the composer. No sidecar parser — agent hears.
+- White-label seam: masthead name resolves env → `SOUL.md`
+  `You are <Name>` → default; agent avatar rides `session.ready` as a
+  capped `image/*` data URL. Live: `Ara` + 147,442 avatar chars
+  (Tom's `Ara-Voss-48.png`) on the wire.
+- Proxy shape gate now declares both keys (`bf7d0e4`) — it caught the
+  seam as smuggled bytes first, correctly.
+- Bronze sigil extension icons (16/32/48/128); action carries only
+  `default_icon`, permissions unchanged.
+- Full `npm test`: 1482/1482 pass on `c48f2a7`. Record:
+  `docs/spikes/005`.
 
 ## Test locally
 

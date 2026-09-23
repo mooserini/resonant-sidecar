@@ -258,7 +258,14 @@ test('manifest grants only native messaging, side panel, and session storage', a
   assert.equal(manifest.manifest_version, 3);
   assert.deepEqual(manifest.permissions.sort(), ['nativeMessaging', 'sidePanel', 'storage']);
   assert.equal(manifest.host_permissions, undefined);
-  assert.deepEqual(manifest.action, {});
+  // Icons are presentation, not privilege: the action carries only a
+  // default_icon (no popup, no badge text), and top-level icons brand the
+  // extension surfaces. No new permissions ride along.
+  assert.deepEqual(Object.keys(manifest.action).sort(), ['default_icon']);
+  for (const iconPath of [...Object.values(manifest.action.default_icon), ...Object.values(manifest.icons)]) {
+    assert.match(iconPath, /^icons\/sigil-(16|32|48|128)\.png$/);
+    await readFile(new URL(`../extension/${iconPath}`, import.meta.url));
+  }
   assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
 });
 
