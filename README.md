@@ -48,7 +48,20 @@ hermes acp
 
 Chrome launches the native host only when the side panel connects. Closing the
 panel disconnects the native port and closes that host process. The Hermes
-thread id is stored in session storage and can be resumed on the next connect.
+thread id is stored in session storage and is resumed on the next connect —
+proven September 2026: Hermes sessions outlive the pipe, `session/resume`
+succeeds across dead processes, and the panel reconnects on show after failure
+(see `docs/browser-session-continuity.md` §5 and Cross-door continuity).
+
+## Active work (September 2026)
+
+Branch `fix/reconnect-honest-plumbing` (this branch until merged):
+
+- Honest `Unavailable` status on sidecar errors instead of a stuck `Connecting`.
+- Auto-reconnect when the panel becomes visible again after a failure.
+- Completed Hermes resume handshake: resume replies carry no `sessionId`, so the requested id stands; replayed history chunks with no live turn are swallowed, never painted.
+- Verified live end to end: panel message → full Chrome Dev quit → reopen resumes the same session; `/handoff` carries the session panel → desktop → Discord with verbatim recall.
+- Full `npm test`: 1482/1482 pass. Trying-loop spikes 001–003 recorded in `docs/spikes/`.
 
 ## Test locally
 

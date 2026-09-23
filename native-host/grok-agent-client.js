@@ -96,17 +96,22 @@ export class GrokAgentClient extends EventEmitter {
     }
 
     let response;
+    let resumedId = null;
     if (threadId === null) {
       response = await this.#request('session/new', { cwd: this.#cwd, mcpServers: [] });
     } else {
       try {
         response = await this.#request('session/resume', { cwd: this.#cwd, sessionId: threadId, mcpServers: [] });
+        // A successful resume is itself the grant: Hermes's resume reply
+        // carries models and payload but no sessionId field, so the
+        // requested id stands.
+        resumedId = threadId;
       } catch {
         response = await this.#request('session/new', { cwd: this.#cwd, mcpServers: [] });
       }
     }
 
-    const openedThreadId = response?.sessionId;
+    const openedThreadId = response?.sessionId ?? resumedId;
     if (typeof openedThreadId !== 'string' || openedThreadId.length === 0) {
       throw new Error('Grok agent returned no session id');
     }
@@ -245,6 +250,9 @@ export class GrokAgentClient extends EventEmitter {
       const update = params.update ?? params;
       const kind = update.sessionUpdate;
       if (kind === 'agent_message_chunk' && update.content?.type === 'text' && typeof update.content.text === 'string') {
+        // Resume replays history with no live turn (turnId null). Swallow
+        // the replay instead of painting ghost transcript cards.
+        if (!this.#turnId) return;
         this.emit('event', {
           type: 'assistant.delta',
           text: update.content.text,

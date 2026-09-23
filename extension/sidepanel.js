@@ -105,7 +105,8 @@ function handleEvent(event) {
   }
   if (event.type === 'error' || event.type === 'protocol.error' || event.type === 'process.error') {
     setBusy(session.turnActive);
-    showError('The local sidecar is unavailable.');
+    setStatus('Unavailable', 'closed');
+    showError('The local sidecar is unavailable. Close and reopen the panel to reconnect.');
   }
 }
 
@@ -202,3 +203,31 @@ try {
   setStatus('Unavailable', 'closed');
   showError('The local sidecar is unavailable.');
 }
+
+// The panel document can outlive its native pipe: hiding the panel
+// disconnects the port, but showing it again does not reload the page,
+// so no new connect is attempted. Reconnect when visible again after a
+// failure instead of stranding Tom on a dead pipe.
+async function reconnect() {
+  errorMessage.hidden = true;
+  setStatus('Connecting', 'connecting');
+  try {
+    session.disconnect();
+  } catch { /* already down */ }
+  try {
+    await session.connect();
+    session.requestUpdateStatus();
+  } catch (error) {
+    setStatus('Unavailable', 'closed');
+    showError('The local sidecar is unavailable. Close and reopen the panel to reconnect.');
+  }
+}
+
+function maybeReconnect() {
+  if (status.dataset.state === 'closed') void reconnect();
+}
+
+document.addEventListener?.('visibilitychange', () => {
+  if (!document.hidden) maybeReconnect();
+});
+window.addEventListener('pageshow', maybeReconnect);
