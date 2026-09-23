@@ -38,7 +38,11 @@ export function executable(p) {
 
 function conversationEvent(message) {
   const shapes = {
-    'session.ready': ['threadId'], 'turn.started': ['turnId'],
+    // White-label seam: the user-scoped host may attach the agent's chosen
+    // displayName (env, else SOUL.md) and a capped image/* displayAvatar
+    // data URL to session.ready. Both are optional strings; anything else
+    // stays rejected. Avatar base64 (~4/3 of the 512KB cap) fits FRAME_LIMIT.
+    'session.ready': ['threadId', 'displayName', 'displayAvatar'], 'turn.started': ['turnId'],
     'assistant.delta': ['text', 'phase', 'turnId'], 'turn.completed': ['status', 'turnId'],
     'error': ['message'], 'protocol.error': ['message'],
     'policy.violation': ['method', 'message'], 'app-server.event': ['method', 'params'],
