@@ -164,6 +164,14 @@ On reopen:
 
 The current prototype closes its native-host process when the panel disconnects and resumes conversation by stored thread identifier. A future implementation may retain a longer-lived coordinator, but that change must remain explicit and reviewed.
 
+Proven September 2026 (trying-loop spikes 001–003, no full-suite gate):
+
+- Hermes ACP sessions **outlive the native pipe**. Killing the host process (panel close, browser quit, SIGKILL) does not kill the Hermes session.
+- `session/resume` succeeds **across processes**: a fresh `hermes acp` process resumes a session created by a dead one, with history intact.
+- A successful resume reply carries models and payload but **no `sessionId` field**. The grant is implicit: the requested id stands. Clients must not demand `sessionId` on the resume path.
+- Resume **replays history** as `session/update` chunks with no live turn. The panel must swallow replayed chunks, never paint them as new transcript cards.
+- The side-panel document can **outlive its native pipe**: hiding the panel disconnects the port without reloading the page, so no new connect is attempted on show. The panel reconnects (fresh `session.open` with the stored thread id) when visible again after a failure state, and error states report honest `Unavailable` instead of stranding the header on `Connecting`.
+
 ### 6. Genuine connection loss and capability degradation
 
 Sidecar has more than one continuity channel. Losing one channel must not erase
@@ -327,6 +335,28 @@ It does not currently declare `tabs`, `debugger`, content scripts, or host permi
 Mature browser companions commonly combine side-panel persistence, active-tab events, navigation events, a persistent native-host port, and a browser-control attachment keyed to tab identity. Some vendor products also have privileged browser integration unavailable to ordinary extensions.
 
 Resonant Sidecar should first prove the supported Hermes and Chrome DevTools MCP path. Any new Chrome permission requires a demonstrated gap, a separate reviewed decision, and a plain-language account of what becomes observable or controllable.
+
+## Cross-door continuity (`/handoff`)
+
+Continuity lives in Hermes, not in any pipe. Surfaces are doors. Verified September 2026, live:
+
+- `/handoff <surface>` moves a live session across doors. Proven path: sidecar panel → desktop app → Discord, with a checkable secret recalled verbatim at every door.
+- `/resume <session_id|number>` and `/sessions all|full|search <query>` manage named sessions per surface.
+- Resume is **custody-bound**: resuming a session that belongs to a different user or chat is refused. The refusal is quiet and exact — a reasonable boundary, not a ceremony.
+- The panel holds only the Hermes thread id in session storage. It never needs the transcript to continue; Hermes brings history on resume.
+- The panel is white-label by design: `session.ready` may carry the
+  agent's chosen `displayName` (launcher env, else the `You are <Name>`
+  line of `~/.hermes/SOUL.md`) and a capped `image/*` `displayAvatar`
+  data URL. ACP exposes only the programmatic agent identity and there
+  is no canonical avatar slot, so the user-scoped host is the carrier —
+  and the bootstrap proxy shape gate declares both keys, rejecting
+  everything else. Proven live September 2026 (`Ara` + portrait on the
+  wire).
+
+Answered September 2026: `session/list` over ACP returns live sessions
+(`sessionId`, `title`, `cwd`, `updatedAt`) — observed with real
+sessions. The panel-level "last five sessions" picker is now unblocked;
+it waits behind the button bar, not behind a missing primitive.
 
 ## Known integration question
 

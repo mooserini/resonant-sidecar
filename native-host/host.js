@@ -5,6 +5,9 @@ import { AcpAgentClient } from './grok-agent-client.js';
 import { resolveAgent } from './agents.js';
 import { NativeMessageDecoder, encodeNativeMessage } from './native-framing.js';
 import { parseBrowserMessage, isLifecycleMessage } from './sidecar-protocol.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 function parseArgs() {
   const encoded = process.env.RESONANT_CODEX_ARGS;
@@ -14,6 +17,36 @@ function parseArgs() {
     throw new TypeError('RESONANT_CODEX_ARGS must be a JSON array of strings');
   }
   return parsed;
+}
+
+const AVATAR_MAX_BYTES = 512 * 1024;
+
+function agentIdentity() {
+  const identity = {};
+  const envName = process.env.RESONANT_AGENT_NAME;
+  if (typeof envName === 'string' && envName) {
+    identity.displayName = envName;
+  } else {
+    try {
+      const head = fs.readFileSync(path.join(os.homedir(), '.hermes', 'SOUL.md'), 'utf8').slice(0, 2048);
+      const match = /^You are ([A-Z][A-Za-z'’-]*)/m.exec(head);
+      if (match) identity.displayName = match[1];
+    } catch { /* no soul on disk: panel keeps its default */ }
+  }
+  const avatarFile = process.env.RESONANT_AGENT_AVATAR;
+  if (typeof avatarFile === 'string' && avatarFile) {
+    try {
+      const bytes = fs.readFileSync(avatarFile);
+      if (bytes.length > 0 && bytes.length <= AVATAR_MAX_BYTES) {
+        const ext = path.extname(avatarFile).toLowerCase();
+        const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+          : ext === '.gif' ? 'image/gif'
+          : ext === '.webp' ? 'image/webp' : 'image/png';
+        identity.displayAvatar = `data:${mime};base64,${bytes.toString('base64')}`;
+      }
+    } catch { /* no avatar: sigil stays */ }
+  }
+  return Object.keys(identity).length > 0 ? identity : null;
 }
 
 const BROWSER_EVENTS = new Set([
@@ -60,6 +93,17 @@ function bindClient(client) {
       return;
     }
     if (!BROWSER_EVENTS.has(event.type)) return;
+    // White-label seam: each machine names its agent and shows its face.
+    // Name order: RESONANT_AGENT_NAME env, then the "You are <Name>" line
+    // of ~/.hermes/SOUL.md (where soul authors put it), then the panel
+    // default. Avatar: RESONANT_AGENT_AVATAR file, capped, image/* only,
+    // inlined as a data URL. ACP exposes only the programmatic
+    // "hermes-agent", never the chosen name — and there is no canonical
+    // avatar slot, so both ride session.ready from the user-scoped host.
+    if (event.type === 'session.ready') {
+      const identity = agentIdentity();
+      if (identity) { send({ ...event, ...identity }); return; }
+    }
     send(event);
   });
 }

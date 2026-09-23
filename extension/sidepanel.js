@@ -9,6 +9,10 @@ const stopButton = document.querySelector('#stop-button');
 const status = document.querySelector('#connection-status');
 const announcement = document.querySelector('#announcement');
 const errorMessage = document.querySelector('#error-message');
+const commandBarButton = document.getElementById('command-bar-button');
+const commandMenu = document.getElementById('command-menu');
+const agentNameHeading = document.getElementById('agent-name');
+const agentSigil = document.getElementById('agent-sigil');
 const reviewCard = document.querySelector('#review-card');
 const reviewTitle = document.querySelector('#review-title');
 const reviewStatus = document.querySelector('#review-status');
@@ -23,6 +27,27 @@ const PREPARATION_NOTICE = 'Chrome may download and store an on-device model. Pr
 
 
 let assistantBody = null;
+let agentName = 'Hermes';
+
+// The panel ships white-label: the host may attach a displayName to
+// session.ready (from RESONANT_AGENT_NAME), so shippers see whatever
+// they named their agent instead of a hardcoded product name.
+function setAgentName(name) {
+  agentName = name;
+  agentNameHeading.textContent = name;
+  text.placeholder = `Ask ${name}…`;
+}
+
+// No canonical avatar slot exists anywhere, so the host may inline one
+// (capped, image/* only). The letter sigil stays until a real face arrives.
+function setAgentAvatar(dataUrl) {
+  agentSigil.textContent = '';
+  const img = document.createElement('img');
+  img.className = 'agent-avatar';
+  img.src = dataUrl;
+  img.alt = '';
+  agentSigil.append(img);
+}
 
 function setStatus(label, state) {
   status.textContent = label;
@@ -32,6 +57,7 @@ function setStatus(label, state) {
 function setBusy(busy) {
   text.disabled = busy;
   sendButton.disabled = busy;
+  commandBarButton.disabled = busy;
   stopButton.disabled = !busy && !session.chromeReviewActive;
 }
 
@@ -48,7 +74,7 @@ function appendMessage(role, content = '') {
 
   const label = document.createElement('span');
   label.className = 'message-label';
-  label.textContent = role === 'user' ? 'You' : 'Hermes';
+  label.textContent = role === 'user' ? 'You' : agentName;
 
   const body = document.createElement('span');
   body.textContent = content;
@@ -66,6 +92,8 @@ function handleEvent(event) {
   if (event.type === 'session.ready') {
     setBusy(false);
     setStatus('Ready', 'ready');
+    if (typeof event.displayName === 'string' && event.displayName) setAgentName(event.displayName);
+    if (typeof event.displayAvatar === 'string' && event.displayAvatar.startsWith('data:image/')) setAgentAvatar(event.displayAvatar);
     announcement.textContent = 'Local session ready.';
     text.focus();
     return;
@@ -105,7 +133,8 @@ function handleEvent(event) {
   }
   if (event.type === 'error' || event.type === 'protocol.error' || event.type === 'process.error') {
     setBusy(session.turnActive);
-    showError('The local sidecar is unavailable.');
+    setStatus('Unavailable', 'closed');
+    showError('The local sidecar is unavailable. Close and reopen the panel to reconnect.');
   }
 }
 
@@ -156,12 +185,12 @@ const session = new SidecarSession({
   onEvent: handleEvent,
 });
 
-form.addEventListener('submit', event => {
-  event.preventDefault();
+function sendCurrentText() {
   const content = text.value;
   if (!content.trim()) return;
 
   errorMessage.hidden = true;
+  commandMenu.hidden = true;
   try {
     session.sendTurn(content);
   } catch {
@@ -171,11 +200,67 @@ form.addEventListener('submit', event => {
   appendMessage('user', content);
   setBusy(true);
   text.value = '';
+}
+
+form.addEventListener('submit', event => {
+  event.preventDefault();
+  sendCurrentText();
 });
 
 stopButton.addEventListener('click', () => {
   try { session.emergencyStop(); }
   catch { showError('Stop could not be requested. The local connection is unavailable.'); }
+});
+
+// Command bar: buttons send slash commands Hermes already hears over ACP
+// (spike 004), so no sidecar slash parser is needed — a leading `/`
+// stays ordinary message text per the V1 boundary. `fire` sends
+// immediately through the normal submit path; `fill` drops the stem
+// into the composer for Tom to complete. Only verbs proven over ACP
+// are listed: resume/compress are unprobed, steer trips the
+// injection guard, voice is CLI-internal, save has no primitive,
+// and approve/deny/restart/update/model knobs are out of scope.
+const COMMANDS = [
+  { name: 'handoff', hint: 'Move this session: desktop, discord, sidecar', mode: 'fill' },
+  { name: 'status', hint: 'Hermes and machine status', mode: 'fire' },
+  { name: 'retry', hint: 'Re-run the last turn', mode: 'fire' },
+  { name: 'undo', hint: 'Back up one exchange', mode: 'fire' },
+  { name: 'queue', hint: 'Queue a prompt for the next turn', mode: 'fill' },
+  { name: 'title', hint: 'Name this session', mode: 'fill' },
+  { name: 'new', hint: 'Fresh session', mode: 'fire' },
+  { name: 'reset', hint: 'Clear this conversation', mode: 'fire' },
+];
+
+for (const command of COMMANDS) {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'command-item';
+  const label = document.createElement('span');
+  label.className = 'command-name';
+  label.textContent = '/' + command.name;
+  const hint = document.createElement('span');
+  hint.className = 'command-hint';
+  hint.textContent = command.hint;
+  item.append(label, hint);
+  item.addEventListener('click', () => {
+    if (command.mode === 'fire') {
+      text.value = '/' + command.name;
+      sendCurrentText();
+    } else {
+      text.value = '/' + command.name + ' ';
+      commandMenu.hidden = true;
+      text.focus();
+    }
+  });
+  commandMenu.append(item);
+}
+
+commandBarButton.addEventListener('click', () => {
+  commandMenu.hidden = !commandMenu.hidden;
+});
+
+document.addEventListener?.('keydown', event => {
+  if (event.key === 'Escape') commandMenu.hidden = true;
 });
 
 for (const [id, method] of Object.entries({ 'prepare-chrome-review': 'prepareChromeReview', 'run-chrome-review': 'runChromeReview', 'cancel-chrome-review': 'cancelChromeReview' })) {
@@ -202,3 +287,31 @@ try {
   setStatus('Unavailable', 'closed');
   showError('The local sidecar is unavailable.');
 }
+
+// The panel document can outlive its native pipe: hiding the panel
+// disconnects the port, but showing it again does not reload the page,
+// so no new connect is attempted. Reconnect when visible again after a
+// failure instead of stranding Tom on a dead pipe.
+async function reconnect() {
+  errorMessage.hidden = true;
+  setStatus('Connecting', 'connecting');
+  try {
+    session.disconnect();
+  } catch { /* already down */ }
+  try {
+    await session.connect();
+    session.requestUpdateStatus();
+  } catch (error) {
+    setStatus('Unavailable', 'closed');
+    showError('The local sidecar is unavailable. Close and reopen the panel to reconnect.');
+  }
+}
+
+function maybeReconnect() {
+  if (status.dataset.state === 'closed') void reconnect();
+}
+
+document.addEventListener?.('visibilitychange', () => {
+  if (!document.hidden) maybeReconnect();
+});
+window.addEventListener('pageshow', maybeReconnect);

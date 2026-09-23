@@ -48,7 +48,38 @@ hermes acp
 
 Chrome launches the native host only when the side panel connects. Closing the
 panel disconnects the native port and closes that host process. The Hermes
-thread id is stored in session storage and can be resumed on the next connect.
+thread id is stored in session storage and is resumed on the next connect —
+proven September 2026: Hermes sessions outlive the pipe, `session/resume`
+succeeds across dead processes, and the panel reconnects on show after failure
+(see `docs/browser-session-continuity.md` §5 and Cross-door continuity).
+
+## Active work (September 2026)
+
+PR #7 (`fix/reconnect-honest-plumbing`) merged as `3442f15`: honest
+`Unavailable` status, auto-reconnect on visible-after-failure, completed
+Hermes resume handshake, live panel → desktop → Discord handoff with
+verbatim recall. Record: `docs/spikes/001–003`.
+
+Branch `spike/command-bar` (current, unmerged as of 2026-09-23 ~05:40 EDT):
+
+- ACP hears slash: `/status`, `/handoff`, `/new`, `/reset`, `/retry`,
+  `/undo`, `/queue` proven as bare turn text; `/title` needs an
+  argument; `/save` doesn't exist; `/steer` unclear (injection guard
+  narrated rejecting a block never sent — flagged); `/voice` refused as
+  CLI-internal. Voice law settled: **Hermes plays, Chrome never
+  touches.** Record: `docs/spikes/004`.
+- `c/|\ds` glyph button + 8-verb menu: fire verbs send instantly, fill
+  verbs drop text in the composer. No sidecar parser — agent hears.
+- White-label seam: masthead name resolves env → `SOUL.md`
+  `You are <Name>` → default; agent avatar rides `session.ready` as a
+  capped `image/*` data URL. Live: `Ara` + 147,442 avatar chars
+  (Tom's `Ara-Voss-48.png`) on the wire.
+- Proxy shape gate now declares both keys (`bf7d0e4`) — it caught the
+  seam as smuggled bytes first, correctly.
+- Bronze sigil extension icons (16/32/48/128); action carries only
+  `default_icon`, permissions unchanged.
+- Full `npm test`: 1482/1482 pass on `c48f2a7`. Record:
+  `docs/spikes/005`.
 
 ## Test locally
 

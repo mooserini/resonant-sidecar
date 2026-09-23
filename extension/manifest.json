@@ -9,10 +9,22 @@
     "sidePanel",
     "storage"
   ],
-  "action": {},
+  "action": {
+    "default_icon": {
+      "16": "icons/sigil-16.png",
+      "32": "icons/sigil-32.png",
+      "48": "icons/sigil-48.png",
+      "128": "icons/sigil-128.png"
+    }
+  },
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
+  },
+  "icons": {
+    "16": "icons/sigil-16.png",
+    "48": "icons/sigil-48.png",
+    "128": "icons/sigil-128.png"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
