@@ -12,6 +12,7 @@ const errorMessage = document.querySelector('#error-message');
 const commandBarButton = document.getElementById('command-bar-button');
 const commandMenu = document.getElementById('command-menu');
 const agentNameHeading = document.getElementById('agent-name');
+const agentSigil = document.getElementById('agent-sigil');
 const reviewCard = document.querySelector('#review-card');
 const reviewTitle = document.querySelector('#review-title');
 const reviewStatus = document.querySelector('#review-status');
@@ -35,6 +36,17 @@ function setAgentName(name) {
   agentName = name;
   agentNameHeading.textContent = name;
   text.placeholder = `Ask ${name}…`;
+}
+
+// No canonical avatar slot exists anywhere, so the host may inline one
+// (capped, image/* only). The letter sigil stays until a real face arrives.
+function setAgentAvatar(dataUrl) {
+  agentSigil.textContent = '';
+  const img = document.createElement('img');
+  img.className = 'agent-avatar';
+  img.src = dataUrl;
+  img.alt = '';
+  agentSigil.append(img);
 }
 
 function setStatus(label, state) {
@@ -81,6 +93,7 @@ function handleEvent(event) {
     setBusy(false);
     setStatus('Ready', 'ready');
     if (typeof event.displayName === 'string' && event.displayName) setAgentName(event.displayName);
+    if (typeof event.displayAvatar === 'string' && event.displayAvatar.startsWith('data:image/')) setAgentAvatar(event.displayAvatar);
     announcement.textContent = 'Local session ready.';
     text.focus();
     return;
