@@ -123,10 +123,10 @@ main { min-height: 0; overflow: auto; }
 }
 .message[data-role="user"] .message-label { color: #e5b778; }
 
-.composer-shell { padding: 0.65rem 0.75rem 0.8rem; border-top: 1px solid #332f2b; background: #171818; }
+.composer-shell { padding: 0.65rem 0.75rem 0.8rem; border-top: 1px solid #332f2b; background: #171818; position: relative; }
 .composer {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: end;
   gap: 0.45rem;
   padding: 0.42rem;
@@ -160,6 +160,35 @@ button {
 }
 .quiet-action { border-color: #594d45; background: #2a2724; color: #c6bbb1; }
 .composer-tool { width: 2.35rem; padding: 0; border-color: #554c46; background: transparent; color: var(--muted); }
+.command-glyph { font-size: 0.62rem; letter-spacing: -0.04em; }
+.command-menu {
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: calc(100% - 0.4rem);
+  padding: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  background: #1d1f1f;
+  box-shadow: 0 -0.5rem 1.5rem rgba(0, 0, 0, 0.5);
+  z-index: 5;
+}
+.command-item {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  padding: 0.5rem 0.6rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.command-item:hover, .command-item:focus-visible { background: #2a2e2e; outline: none; }
+.command-item .command-name { color: #8fe3b0; font-weight: 700; }
+.command-item .command-hint { color: var(--muted); font-size: 0.72rem; margin-left: 0.5rem; }
 .send { width: 2.35rem; padding: 0; font-size: 1.1rem; }
 button.stop { border-color: var(--red); background: #5c2a26; color: #fff4ef; }
 button.stop span:first-child { font-size: 1.1rem; }

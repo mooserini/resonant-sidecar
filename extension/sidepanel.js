@@ -9,6 +9,8 @@ const stopButton = document.querySelector('#stop-button');
 const status = document.querySelector('#connection-status');
 const announcement = document.querySelector('#announcement');
 const errorMessage = document.querySelector('#error-message');
+const commandBarButton = document.getElementById('command-bar-button');
+const commandMenu = document.getElementById('command-menu');
 const reviewCard = document.querySelector('#review-card');
 const reviewTitle = document.querySelector('#review-title');
 const reviewStatus = document.querySelector('#review-status');
@@ -32,6 +34,7 @@ function setStatus(label, state) {
 function setBusy(busy) {
   text.disabled = busy;
   sendButton.disabled = busy;
+  commandBarButton.disabled = busy;
   stopButton.disabled = !busy && !session.chromeReviewActive;
 }
 
@@ -157,12 +160,12 @@ const session = new SidecarSession({
   onEvent: handleEvent,
 });
 
-form.addEventListener('submit', event => {
-  event.preventDefault();
+function sendCurrentText() {
   const content = text.value;
   if (!content.trim()) return;
 
   errorMessage.hidden = true;
+  commandMenu.hidden = true;
   try {
     session.sendTurn(content);
   } catch {
@@ -172,11 +175,67 @@ form.addEventListener('submit', event => {
   appendMessage('user', content);
   setBusy(true);
   text.value = '';
+}
+
+form.addEventListener('submit', event => {
+  event.preventDefault();
+  sendCurrentText();
 });
 
 stopButton.addEventListener('click', () => {
   try { session.emergencyStop(); }
   catch { showError('Stop could not be requested. The local connection is unavailable.'); }
+});
+
+// Command bar: buttons send slash commands Hermes already hears over ACP
+// (spike 004), so no sidecar slash parser is needed — a leading `/`
+// stays ordinary message text per the V1 boundary. `fire` sends
+// immediately through the normal submit path; `fill` drops the stem
+// into the composer for Tom to complete. Only verbs proven over ACP
+// are listed: resume/compress are unprobed, steer trips the
+// injection guard, voice is CLI-internal, save has no primitive,
+// and approve/deny/restart/update/model knobs are out of scope.
+const COMMANDS = [
+  { name: 'handoff', hint: 'Move this session: desktop, discord, sidecar', mode: 'fill' },
+  { name: 'status', hint: 'Hermes and machine status', mode: 'fire' },
+  { name: 'retry', hint: 'Re-run the last turn', mode: 'fire' },
+  { name: 'undo', hint: 'Back up one exchange', mode: 'fire' },
+  { name: 'queue', hint: 'Queue a prompt for the next turn', mode: 'fill' },
+  { name: 'title', hint: 'Name this session', mode: 'fill' },
+  { name: 'new', hint: 'Fresh session', mode: 'fire' },
+  { name: 'reset', hint: 'Clear this conversation', mode: 'fire' },
+];
+
+for (const command of COMMANDS) {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'command-item';
+  const label = document.createElement('span');
+  label.className = 'command-name';
+  label.textContent = '/' + command.name;
+  const hint = document.createElement('span');
+  hint.className = 'command-hint';
+  hint.textContent = command.hint;
+  item.append(label, hint);
+  item.addEventListener('click', () => {
+    if (command.mode === 'fire') {
+      text.value = '/' + command.name;
+      sendCurrentText();
+    } else {
+      text.value = '/' + command.name + ' ';
+      commandMenu.hidden = true;
+      text.focus();
+    }
+  });
+  commandMenu.append(item);
+}
+
+commandBarButton.addEventListener('click', () => {
+  commandMenu.hidden = !commandMenu.hidden;
+});
+
+document.addEventListener?.('keydown', event => {
+  if (event.key === 'Escape') commandMenu.hidden = true;
 });
 
 for (const [id, method] of Object.entries({ 'prepare-chrome-review': 'prepareChromeReview', 'run-chrome-review': 'runChromeReview', 'cancel-chrome-review': 'cancelChromeReview' })) {

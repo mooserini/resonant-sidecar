@@ -57,8 +57,10 @@
     <footer class="composer-shell">
       <p id="announcement" class="sr-only" aria-live="polite"></p>
       <p id="error-message" class="error" role="alert" hidden></p>
+      <div id="command-menu" class="command-menu" hidden role="menu" aria-label="Hermes commands"></div>
       <form id="turn-form" class="composer">
         <button id="capture-page" class="composer-tool" type="button" disabled aria-label="Capture visible page (unavailable)" title="Page capture is not available">▧</button>
+        <button id="command-bar-button" class="composer-tool command-glyph" type="button" aria-label="Hermes commands" title="Commands Hermes hears">&lt;c/|\ds&gt;</button>
         <label class="sr-only" for="turn-text">Ask Hermes</label>
         <textarea id="turn-text" name="message" rows="2" maxlength="32768" required placeholder="Ask Hermes…"></textarea>
         <button id="send-button" class="send" type="submit" aria-label="Send turn" disabled>↑</button>
