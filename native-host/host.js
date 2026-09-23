@@ -60,6 +60,13 @@ function bindClient(client) {
       return;
     }
     if (!BROWSER_EVENTS.has(event.type)) return;
+    // White-label seam: RESONANT_AGENT_NAME lets each machine name its
+    // agent (ACP exposes only the programmatic "hermes-agent", never the
+    // chosen name). Absent env means the panel keeps its default.
+    if (event.type === 'session.ready' && typeof process.env.RESONANT_AGENT_NAME === 'string' && process.env.RESONANT_AGENT_NAME) {
+      send({ ...event, displayName: process.env.RESONANT_AGENT_NAME });
+      return;
+    }
     send(event);
   });
 }

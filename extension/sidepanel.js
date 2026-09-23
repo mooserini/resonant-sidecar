@@ -11,6 +11,7 @@ const announcement = document.querySelector('#announcement');
 const errorMessage = document.querySelector('#error-message');
 const commandBarButton = document.getElementById('command-bar-button');
 const commandMenu = document.getElementById('command-menu');
+const agentNameHeading = document.getElementById('agent-name');
 const reviewCard = document.querySelector('#review-card');
 const reviewTitle = document.querySelector('#review-title');
 const reviewStatus = document.querySelector('#review-status');
@@ -25,6 +26,16 @@ const PREPARATION_NOTICE = 'Chrome may download and store an on-device model. Pr
 
 
 let assistantBody = null;
+let agentName = 'Hermes';
+
+// The panel ships white-label: the host may attach a displayName to
+// session.ready (from RESONANT_AGENT_NAME), so shippers see whatever
+// they named their agent instead of a hardcoded product name.
+function setAgentName(name) {
+  agentName = name;
+  agentNameHeading.textContent = name;
+  text.placeholder = `Ask ${name}…`;
+}
 
 function setStatus(label, state) {
   status.textContent = label;
@@ -51,7 +62,7 @@ function appendMessage(role, content = '') {
 
   const label = document.createElement('span');
   label.className = 'message-label';
-  label.textContent = role === 'user' ? 'You' : 'Hermes';
+  label.textContent = role === 'user' ? 'You' : agentName;
 
   const body = document.createElement('span');
   body.textContent = content;
@@ -69,6 +80,7 @@ function handleEvent(event) {
   if (event.type === 'session.ready') {
     setBusy(false);
     setStatus('Ready', 'ready');
+    if (typeof event.displayName === 'string' && event.displayName) setAgentName(event.displayName);
     announcement.textContent = 'Local session ready.';
     text.focus();
     return;

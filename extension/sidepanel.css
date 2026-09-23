@@ -126,7 +126,7 @@ main { min-height: 0; overflow: auto; }
 .composer-shell { padding: 0.65rem 0.75rem 0.8rem; border-top: 1px solid #332f2b; background: #171818; position: relative; }
 .composer {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: end;
   gap: 0.45rem;
   padding: 0.42rem;
@@ -190,8 +190,9 @@ button {
 .command-item .command-name { color: #8fe3b0; font-weight: 700; }
 .command-item .command-hint { color: var(--muted); font-size: 0.72rem; margin-left: 0.5rem; }
 .send { width: 2.35rem; padding: 0; font-size: 1.1rem; }
-button.stop { border-color: var(--red); background: #5c2a26; color: #fff4ef; }
+button.stop { width: 2.35rem; padding: 0; border-color: #6e3a34; background: #40201d; color: #ffd3cf; }
 button.stop span:first-child { font-size: 1.1rem; }
+.stop-label { display: none; }
 button:disabled { cursor: not-allowed; filter: grayscale(0.55); opacity: 0.52; }
 button:focus-visible, textarea:focus-visible, #review-title:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
 
